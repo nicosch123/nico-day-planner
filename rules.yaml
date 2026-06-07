@@ -1,0 +1,77 @@
+version: 1
+mode: dry_run
+locale: de-DE
+timezone: Europe/Berlin
+
+planning_window:
+  target_day: tomorrow
+  start: "09:00"
+  end: "23:00"
+
+sources:
+  todoist:
+    enabled: true
+    access: read_only
+  google_calendar:
+    enabled: true
+    access: read_only
+    fixed_events_are_blockers: true
+
+categories:
+  - Werkstatt
+  - Studio
+  - ALEGRA
+  - Haushalt
+  - Privat
+  - LIVE
+  - Soundwerk
+  - Buchhaltung
+
+prioritization:
+  todoist_priority_order:
+    - P1
+    - P2
+    - P3
+    - P4
+  schedule_p1_first: true
+
+capacity:
+  max_free_time_planned_percent: 70
+  include_daily_buffers: true
+  default_buffer_minutes: 15
+
+estimation:
+  estimate_missing_durations: true
+  mark_estimates: true
+  default_estimated_duration_minutes: 30
+  long_task_threshold_minutes: 120
+  long_task_action: propose_split_do_not_auto_schedule
+
+category_rules:
+  Werkstatt:
+    diagnosis_preferred_windows:
+      - "09:00-12:00"
+      - "13:00-18:00"
+    avoid_late_night: true
+  Buchhaltung:
+    latest_end_time: "21:00"
+  Haushalt:
+    prefer_gap_filler: true
+    preferred_max_block_minutes: 30
+  Privat:
+    protect_health_and_private_time: true
+  Studio: {}
+  ALEGRA: {}
+  LIVE: {}
+  Soundwerk: {}
+
+output:
+  format: markdown
+  include_sections:
+    - assumptions
+    - fixed_calendar_events
+    - proposed_day_plan
+    - buffers
+    - not_scheduled
+    - split_suggestions
+  always_include_not_scheduled: true
