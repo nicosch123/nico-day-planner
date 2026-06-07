@@ -1,0 +1,227 @@
+[
+  {
+    "id": "werkstatt-001",
+    "title": "Echolette NG51 Bandpfad reinigen",
+    "category": "Werkstatt",
+    "priority": "P2",
+    "duration_minutes": 45,
+    "customer_waiting": true
+  },
+  {
+    "id": "werkstatt-002",
+    "title": "Echolette NG51 Netzteil-Elkos tauschen",
+    "category": "Werkstatt",
+    "priority": "P1",
+    "duration_minutes": 150,
+    "notes": "Bewusst über 120 Minuten, damit die Zerlegungslogik getestet wird.",
+    "customer_waiting": true,
+    "blocks_other_tasks": true,
+    "due": "tomorrow"
+  },
+  {
+    "id": "werkstatt-003",
+    "title": "Leslie 720 Bass-Rotor Diagnose",
+    "category": "Werkstatt",
+    "priority": "P1",
+    "duration_minutes": 90,
+    "notes": "Werkstatt-Diagnose, bevorzugt vormittags oder nachmittags.",
+    "customer_waiting": true,
+    "blocks_other_tasks": true,
+    "due": "tomorrow"
+  },
+  {
+    "id": "werkstatt-004",
+    "title": "dB Cromo 10 Kurzschluss weiter lokalisieren",
+    "category": "Werkstatt",
+    "priority": "P1",
+    "duration_minutes": 75,
+    "notes": "Diagnose/Fehlersuche, nicht spät abends planen.",
+    "customer_waiting": true,
+    "blocks_other_tasks": true,
+    "due": "in_3_days"
+  },
+  {
+    "id": "werkstatt-005",
+    "title": "Werkstatt-Statusliste aktualisieren",
+    "category": "Werkstatt",
+    "priority": "P3",
+    "duration_minutes": 30
+  },
+  {
+    "id": "studio-001",
+    "title": "MOMO-Onepager Struktur festlegen",
+    "category": "Studio",
+    "priority": "P1",
+    "duration_minutes": 60,
+    "blocks_other_tasks": true,
+    "due": "in_3_days"
+  },
+  {
+    "id": "studio-002",
+    "title": "Studio-Leistungstexte schreiben",
+    "category": "Studio",
+    "priority": "P2",
+    "duration_minutes": 90
+  },
+  {
+    "id": "studio-003",
+    "title": "RME/ADAT/Powerplay Routing dokumentieren",
+    "category": "Studio",
+    "priority": "P2",
+    "duration_minutes": null,
+    "notes": "Dauer fehlt bewusst, damit die Schätzlogik greift.",
+    "blocks_other_tasks": true
+  },
+  {
+    "id": "alegra-001",
+    "title": "ALEGRA Demos durchhören und bewerten",
+    "category": "ALEGRA",
+    "priority": "P1",
+    "duration_minutes": 80,
+    "due": "in_3_days"
+  },
+  {
+    "id": "alegra-002",
+    "title": "„Wenn du tanzt“ Release-Postings vorbereiten",
+    "category": "ALEGRA",
+    "priority": "P1",
+    "duration_minutes": 70,
+    "due": "in_3_days"
+  },
+  {
+    "id": "alegra-003",
+    "title": "Live-Session 1 Song sichten",
+    "category": "ALEGRA",
+    "priority": "P2",
+    "duration_minutes": null,
+    "notes": "Dauer fehlt bewusst, damit die Schätzlogik greift."
+  },
+  {
+    "id": "buchhaltung-001",
+    "title": "Juni-Ausgaben in Lexware kategorisieren",
+    "category": "Buchhaltung",
+    "priority": "P1",
+    "duration_minutes": 75,
+    "due": "tomorrow",
+    "notes": "Steuerrelevante Frist für Monatsabschluss."
+  },
+  {
+    "id": "buchhaltung-002",
+    "title": "Belege hochladen und Kontobewegungen verknüpfen",
+    "category": "Buchhaltung",
+    "priority": "P2",
+    "duration_minutes": 60,
+    "blocks_other_tasks": true,
+    "due": "in_3_days"
+  },
+  {
+    "id": "buchhaltung-003",
+    "title": "Reverse-Charge-Rechnungen prüfen",
+    "category": "Buchhaltung",
+    "priority": "P2",
+    "duration_minutes": null,
+    "notes": "Dauer fehlt bewusst, damit die Schätzlogik greift.",
+    "due": "in_3_days"
+  },
+  {
+    "id": "haushalt-001",
+    "title": "Wäsche waschen",
+    "category": "Haushalt",
+    "priority": "P3",
+    "duration_minutes": 20
+  },
+  {
+    "id": "haushalt-002",
+    "title": "Küche aufräumen",
+    "category": "Haushalt",
+    "priority": "P3",
+    "duration_minutes": 25
+  },
+  {
+    "id": "haushalt-003",
+    "title": "Pflanzen checken",
+    "category": "Haushalt",
+    "priority": "P4",
+    "duration_minutes": 10
+  },
+  {
+    "id": "haushalt-004",
+    "title": "Müll rausbringen",
+    "category": "Haushalt",
+    "priority": "P4",
+    "duration_minutes": 10
+  },
+  {
+    "id": "privat-001",
+    "title": "Krankenkassen-Formular fertig ausfüllen",
+    "category": "Privat",
+    "priority": "P1",
+    "duration_minutes": 50,
+    "due": "tomorrow"
+  },
+  {
+    "id": "privat-002",
+    "title": "Ernährung Wochenplan machen",
+    "category": "Privat",
+    "priority": "P2",
+    "duration_minutes": 35
+  },
+  {
+    "id": "privat-003",
+    "title": "Sportblock zuhause",
+    "category": "Privat",
+    "priority": "P2",
+    "duration_minutes": 45,
+    "notes": "Gesundheit/Privat soll nicht verdrängt werden.",
+    "due": "in_3_days"
+  },
+  {
+    "id": "live-001",
+    "title": "QU-24 USB-Stick Problem weiter prüfen",
+    "category": "LIVE",
+    "priority": "P1",
+    "duration_minutes": 65,
+    "blocks_other_tasks": true,
+    "due": "tomorrow"
+  },
+  {
+    "id": "live-002",
+    "title": "FOH-Packliste erstellen",
+    "category": "LIVE",
+    "priority": "P2",
+    "duration_minutes": 40,
+    "due": "in_3_days"
+  },
+  {
+    "id": "live-003",
+    "title": "Live-Mitschnitt-Template vorbereiten",
+    "category": "LIVE",
+    "priority": "P2",
+    "duration_minutes": 55,
+    "blocks_other_tasks": true
+  },
+  {
+    "id": "soundwerk-001",
+    "title": "Schülerstände aktualisieren",
+    "category": "Soundwerk",
+    "priority": "P1",
+    "duration_minutes": 45,
+    "notes": "Kleine Nachbereitung/Schülernotizen; bevorzugt in Unterrichtspausen statt am Vortag."
+  },
+  {
+    "id": "soundwerk-002",
+    "title": "Unterrichtsmaterial vorbereiten",
+    "category": "Soundwerk",
+    "priority": "P2",
+    "duration_minutes": 70,
+    "notes": "Normale Unterrichtsvorbereitung; bevorzugt direkt vor dem Unterricht."
+  },
+  {
+    "id": "soundwerk-003",
+    "title": "nächsten Unterrichtstag planen",
+    "category": "Soundwerk",
+    "priority": "P2",
+    "duration_minutes": null,
+    "notes": "Dauer fehlt bewusst; Unterrichtsplanung bevorzugt direkt vor dem Unterricht."
+  }
+]

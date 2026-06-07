@@ -1,0 +1,233 @@
+version: 0.5
+mode: dry_run
+locale: de-DE
+timezone: Europe/Berlin
+
+planning_window:
+  target_day: tomorrow
+  start: "09:00"
+  end: "23:00"
+
+locations:
+  Mengen:
+    contains:
+      - Werkstatt
+      - Soundwerk/Musikschule
+  Aulendorf:
+    contains:
+      - Wohnort
+      - Studio
+      - Haushalt
+      - Büro/Admin
+  default_transport: Auto
+  travel_between_mengen_and_aulendorf_minutes: 60
+  travel_time_blocks_planning: true
+  train_exception:
+    enabled: true
+    allowed_task_types:
+      - leichte Orga
+      - Planung
+      - Büro
+
+typical_week:
+  monday:
+    - "09:00-17:00 Werkstatt in Mengen"
+  tuesday:
+    - "09:00-14:00 Werkstatt in Mengen"
+    - "14:00-16:00 Klavierunterricht / Soundwerk in Mengen"
+  wednesday:
+    - "09:00-14:00 Werkstatt in Mengen"
+    - "14:00-18:30 Klavierunterricht / Soundwerk in Mengen"
+    - "15:00-15:30 Pause"
+    - "16:00-17:00 Pause"
+  thursday:
+    - "09:00-12:00 Werkstatt in Mengen"
+    - "14:00-18:00 Studio Aulendorf: Producing Alex/Nico, ALEGRA-Zeit"
+    - "20:00-open end Studio Aulendorf: Producing Alex/Nico, ALEGRA-Zeit"
+  friday:
+    - "09:00-17:00 Werkstatt in Mengen"
+  saturday:
+    - "flexibel: Werkstatt, Studio, ALEGRA, Haushalt oder Büro je nach Priorität"
+  sunday:
+    - "grundsätzlich frei: höchstens Haushalt, Büro, Planung, leichte Admin-Aufgaben, ALEGRA-/Studio-Orga oder Regeneration"
+
+
+sources:
+  tasks:
+    default: json
+    options:
+      - json
+      - todoist
+  todoist:
+    enabled: true
+    access: read_only
+    token_env: TODOIST_API_TOKEN
+    mutating_operations_forbidden:
+      - create_task
+      - update_task
+      - close_task
+      - delete_task
+      - update_labels
+      - add_comment
+  google_calendar:
+    enabled: true
+    access: read_only
+    fixed_events_are_blockers: true
+
+categories:
+  - Werkstatt
+  - Studio
+  - ALEGRA
+  - Haushalt
+  - Privat
+  - LIVE
+  - Soundwerk
+  - Buchhaltung
+
+
+scoring:
+  priority_points:
+    P1: 100
+    P2: 60
+    P3: 30
+    P4: 10
+  factors:
+    authority_health_insurance_tax_or_deadline: 50
+    customer_waiting_or_workshop_customer_order: 40
+    blocks_other_tasks: 30
+    deadline_tomorrow_or_earlier: 50
+    deadline_within_3_days: 30
+    estimated_duration: -10
+    unclear_task: -20
+
+prioritization:
+  todoist_priority_order:
+    - P1
+    - P2
+    - P3
+    - P4
+  schedule_p1_first: true
+
+capacity:
+  max_free_time_planned_percent: 70
+  include_daily_buffers: true
+  default_buffer_minutes: 15
+  max_large_focus_blocks_per_day: 3
+  large_focus_block_min_minutes: 60
+  max_main_tasks_per_day: 6
+  main_task_min_minutes: 16
+  max_mini_tasks_per_day: 2
+  mini_task_max_minutes: 15
+  require_small_private_health_or_household_block: true
+
+estimation:
+  estimate_missing_durations: true
+  mark_estimates: true
+  default_estimated_duration_minutes: 30
+  long_task_threshold_minutes: 120
+  long_task_action: propose_split_do_not_auto_schedule
+
+workload_rules:
+  technical_buffer_after_blocks_min_minutes: 60
+  technical_buffer_minutes: 15
+  technical_buffer_reason: "Diagnose, Aufräumen, Notizen, Messaufbau abbauen"
+  reserve_capacity_for_urgent_evening_admin: true
+  day_rating:
+    realistic: "unter ca. 78% der Plan-Kapazität und höchstens 5 Hauptaufgaben"
+    sporty: "bis ca. 95% der Plan-Kapazität oder ein Deadline-bedingter Zusatztask"
+    too_full: "darüber"
+
+category_rules:
+  Werkstatt:
+    diagnosis_preferred_windows:
+      - "09:00-12:00"
+      - "13:00-19:00"
+    diagnosis_latest_end_time: "19:00"
+    avoid_late_night: true
+  Buchhaltung:
+    preferred_windows:
+      - "18:00-21:30"
+      - "Sonntag"
+    latest_end_time: "22:00"
+    avoid_workshop_focus_time_unless_urgent: true
+    hierarchy:
+      main_broad_tasks_before_specialist_side_tasks: true
+      example_main_task: "Juni-Ausgaben in Lexware kategorisieren"
+      example_side_task: "Reverse-Charge-Rechnungen prüfen"
+  Haushalt:
+    prefer_gap_filler: true
+    preferred_max_block_minutes: 30
+    preferred_times:
+      - Abend
+      - Samstag
+      - Sonntag
+  Privat:
+    protect_health_and_private_time: true
+  Studio:
+    location: Aulendorf
+    general_momo_preferred_times:
+      - Abend in Aulendorf
+      - Samstag
+      - Sonntag
+    alex_nico_thursday_session_is_not_general_studio_time: true
+    do_not_prioritize_before_customer_authority_or_tax: true
+  ALEGRA:
+    location: Aulendorf
+    producing_preferred_times:
+      - Donnerstag Alex/Nico-Studiozeit
+      - Samstag
+    orga_release_preferred_times:
+      - Abend
+      - Sonntag
+    do_not_prioritize_before_customer_authority_or_tax: true
+  LIVE:
+    technical_tasks_context: Werkstatt oder Studio
+    orga_packlists_preferred_times:
+      - Abend
+      - Sonntag
+  Soundwerk:
+    location: Mengen
+    planning_not_automatically_day_before_teaching: true
+    preparation_preferred_directly_before_teaching: true
+    preferred_preparation_windows:
+      Dienstag: "13:00-14:00"
+      Mittwoch: "13:00-14:00"
+    pause_windows_for_small_notes_or_followup:
+      Mittwoch:
+        - "15:00-15:30"
+        - "16:00-17:00"
+    day_before_allowed_only_if:
+      - harte Deadline
+      - spezieller Materialdruck
+      - außergewöhnlich große Vorbereitung
+    otherwise_normal_priority: true
+    removed_rule: "Wenn morgen Unterricht ist, mindestens eine Soundwerk-Aufgabe einplanen."
+
+admin_rules:
+  preferred_window: "18:00-21:30"
+  latest_end_time: "22:00"
+  hard_deadline_allows_earlier: true
+  urgent_admin_before_sport_or_optional_private_tasks: true
+
+sorting_rules:
+  mengen_workshop_order:
+    - Kunden-/Diagnoseaufgaben
+    - Soundwerk-Vorbereitung
+    - Werkstatt-Orga
+  aulendorf_evening_order:
+    - dringende Admin/Formulare
+    - Buchhaltung/Büro
+    - Sport/Haushalt/leichte Aufgaben
+
+output:
+  format: markdown
+  include_sections:
+    - assumptions
+    - fixed_calendar_events
+    - proposed_day_plan
+    - score_reasons
+    - day_rating
+    - buffers
+    - not_scheduled
+    - split_suggestions
+  always_include_not_scheduled: true

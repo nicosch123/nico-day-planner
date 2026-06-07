@@ -1,0 +1,148 @@
+{
+  "weekly_structure": {
+    "monday": [
+      {
+        "id": "weekly-mon-workshop",
+        "title": "Werkstatt in Mengen",
+        "context": "Werkstatt",
+        "location": "Mengen",
+        "start": "09:00",
+        "end": "17:00"
+      }
+    ],
+    "tuesday": [
+      {
+        "id": "weekly-tue-workshop",
+        "title": "Werkstatt in Mengen",
+        "context": "Werkstatt",
+        "location": "Mengen",
+        "start": "09:00",
+        "end": "14:00"
+      },
+      {
+        "id": "weekly-tue-soundwerk",
+        "title": "Klavierunterricht / Soundwerk in Mengen",
+        "context": "Soundwerk",
+        "location": "Mengen",
+        "start": "14:00",
+        "end": "16:00"
+      }
+    ],
+    "wednesday": [
+      {
+        "id": "weekly-wed-workshop",
+        "title": "Werkstatt in Mengen",
+        "context": "Werkstatt",
+        "location": "Mengen",
+        "start": "09:00",
+        "end": "14:00"
+      },
+      {
+        "id": "weekly-wed-soundwerk",
+        "title": "Klavierunterricht / Soundwerk in Mengen",
+        "context": "Soundwerk",
+        "location": "Mengen",
+        "start": "14:00",
+        "end": "18:30"
+      }
+    ],
+    "thursday": [
+      {
+        "id": "weekly-thu-workshop",
+        "title": "Werkstatt in Mengen",
+        "context": "Werkstatt",
+        "location": "Mengen",
+        "start": "09:00",
+        "end": "12:00"
+      },
+      {
+        "id": "weekly-thu-alegra-afternoon",
+        "title": "Studio Aulendorf: Producing Alex/Nico, ALEGRA-Zeit",
+        "context": "ALEGRA-Producing",
+        "location": "Aulendorf",
+        "start": "14:00",
+        "end": "18:00"
+      },
+      {
+        "id": "weekly-thu-alegra-evening",
+        "title": "Studio Aulendorf: Producing Alex/Nico, ALEGRA-Zeit",
+        "context": "ALEGRA-Producing",
+        "location": "Aulendorf",
+        "start": "20:00",
+        "end": "23:00"
+      }
+    ],
+    "friday": [
+      {
+        "id": "weekly-fri-workshop",
+        "title": "Werkstatt in Mengen",
+        "context": "Werkstatt",
+        "location": "Mengen",
+        "start": "09:00",
+        "end": "17:00"
+      }
+    ],
+    "saturday": [
+      {
+        "id": "weekly-sat-flex",
+        "title": "Flexibler Samstag",
+        "context": "Flex",
+        "location": "Aulendorf",
+        "start": "09:00",
+        "end": "23:00"
+      }
+    ],
+    "sunday": [
+      {
+        "id": "weekly-sun-light",
+        "title": "Sonntag frei / leichte Aufgaben",
+        "context": "Leicht/Admin/Regeneration",
+        "location": "Aulendorf",
+        "start": "09:00",
+        "end": "23:00"
+      }
+    ]
+  },
+  "fixed_events": [
+    {
+      "id": "event-mon-lunch",
+      "title": "Mittagspause Werkstatt",
+      "calendar": "Privat",
+      "weekday": "monday",
+      "start": "13:00",
+      "end": "13:45"
+    },
+    {
+      "id": "event-wed-break-1",
+      "title": "Pause Soundwerk",
+      "calendar": "Privat",
+      "weekday": "wednesday",
+      "start": "15:00",
+      "end": "15:30"
+    },
+    {
+      "id": "event-wed-break-2",
+      "title": "Pause Soundwerk",
+      "calendar": "Privat",
+      "weekday": "wednesday",
+      "start": "16:00",
+      "end": "17:00"
+    },
+    {
+      "id": "event-thu-lunch",
+      "title": "Mittag / Übergang vor Studio",
+      "calendar": "Privat",
+      "weekday": "thursday",
+      "start": "13:00",
+      "end": "14:00"
+    },
+    {
+      "id": "event-sun-family",
+      "title": "Sonntagsspaziergang / Regeneration",
+      "calendar": "Privat",
+      "weekday": "sunday",
+      "start": "15:00",
+      "end": "16:30"
+    }
+  ]
+}
