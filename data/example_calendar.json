@@ -1,0 +1,37 @@
+[
+  {
+    "id": "event-001",
+    "title": "Morgenroutine / Frühstück",
+    "calendar": "Privat",
+    "start": "09:00",
+    "end": "09:30"
+  },
+  {
+    "id": "event-002",
+    "title": "Kundentermin Werkstatt",
+    "calendar": "Arbeit",
+    "start": "11:00",
+    "end": "12:15"
+  },
+  {
+    "id": "event-003",
+    "title": "Mittagspause",
+    "calendar": "Privat",
+    "start": "13:00",
+    "end": "13:45"
+  },
+  {
+    "id": "event-004",
+    "title": "Studio Call",
+    "calendar": "Studio",
+    "start": "16:30",
+    "end": "17:15"
+  },
+  {
+    "id": "event-005",
+    "title": "Abendtermin",
+    "calendar": "Privat",
+    "start": "20:00",
+    "end": "20:45"
+  }
+]

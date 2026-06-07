@@ -1,0 +1,75 @@
+[
+  {
+    "id": "task-001",
+    "title": "Fehlerdiagnose Verstärker durchführen",
+    "category": "Werkstatt",
+    "priority": "P1",
+    "duration_minutes": 90,
+    "notes": "Werkstatt-Diagnose, bevorzugt nicht spät abends."
+  },
+  {
+    "id": "task-002",
+    "title": "Studio-Mix für Demo vorbereiten",
+    "category": "Studio",
+    "priority": "P2",
+    "duration_minutes": 75
+  },
+  {
+    "id": "task-003",
+    "title": "ALEGRA Rückfragen beantworten",
+    "category": "ALEGRA",
+    "priority": "P1",
+    "duration_minutes": 45
+  },
+  {
+    "id": "task-004",
+    "title": "Küche aufräumen und Müll rausbringen",
+    "category": "Haushalt",
+    "priority": "P3",
+    "duration_minutes": 20
+  },
+  {
+    "id": "task-005",
+    "title": "Spaziergang und kurze Pause",
+    "category": "Privat",
+    "priority": "P2",
+    "duration_minutes": 30,
+    "notes": "Gesundheit/Erholung soll nicht verdrängt werden."
+  },
+  {
+    "id": "task-006",
+    "title": "LIVE-Set technische Vorbereitung",
+    "category": "LIVE",
+    "priority": "P1",
+    "duration_minutes": 130,
+    "notes": "Zu lang für automatische Planung; soll zerlegt werden."
+  },
+  {
+    "id": "task-007",
+    "title": "Soundwerk Materialliste prüfen",
+    "category": "Soundwerk",
+    "priority": "P2",
+    "duration_minutes": null
+  },
+  {
+    "id": "task-008",
+    "title": "Belege sortieren und buchen",
+    "category": "Buchhaltung",
+    "priority": "P1",
+    "duration_minutes": 60
+  },
+  {
+    "id": "task-009",
+    "title": "Wäsche zusammenlegen",
+    "category": "Haushalt",
+    "priority": "P4",
+    "duration_minutes": 15
+  },
+  {
+    "id": "task-010",
+    "title": "Werkstatt Ersatzteile recherchieren",
+    "category": "Werkstatt",
+    "priority": "P3",
+    "duration_minutes": 40
+  }
+]
