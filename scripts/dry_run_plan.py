@@ -127,6 +127,7 @@ class PlanResult:
     source: str
     fallback_used: bool = False
     warnings: list[str] = field(default_factory=list)
+    source_details: tuple[str, ...] = field(default_factory=tuple)
 
 
 def parse_hhmm(value: str) -> time:
@@ -337,24 +338,24 @@ def rejection_reason(task: Task, blocks: list[Block]) -> str:
     return "Passte nicht in freie Zeit, Kapazitätslimit, Aufgabenlimit oder Kategorie-Zeitregel."
 
 
-def load_tasks_for_source(source: str) -> tuple[list[Task], str, bool, list[str]]:
+def load_tasks_for_source(source: str) -> tuple[list[Task], str, bool, list[str], tuple[str, ...]]:
     warnings: list[str] = []
     if source == "json":
-        return load_json_tasks(), "JSON: lokale Beispielaufgaben geladen.", False, warnings
+        return load_json_tasks(), "JSON: lokale Beispielaufgaben geladen.", False, warnings, ()
 
     try:
         result = load_todoist_tasks_from_env()
     except TodoistReadError as exc:
         warnings.append(f"Todoist konnte nicht gelesen werden ({exc}) – verwende lokale JSON-Beispieldaten.")
-        return load_json_tasks(), warnings[-1], True, warnings
+        return load_json_tasks(), warnings[-1], True, warnings, ()
 
     if result.used_fallback:
-        return load_json_tasks(), result.status, True, warnings
-    return [normalize_task(task) for task in result.tasks], result.status, False, warnings
+        return load_json_tasks(), result.status, True, warnings, result.status_details
+    return [normalize_task(task) for task in result.tasks], result.status, False, warnings, result.status_details
 
 
 def build_plan(source: str, target_day: date) -> PlanResult:
-    tasks, source_status, fallback_used, warnings = load_tasks_for_source(source)
+    tasks, source_status, fallback_used, warnings, source_details = load_tasks_for_source(source)
     fixed_blocks = load_calendar_blocks(target_day) + weekly_blocks(target_day)
     fixed_blocks += travel_blocks(fixed_blocks)
     fixed_blocks = merge_overlapping(fixed_blocks)
@@ -415,6 +416,7 @@ def build_plan(source: str, target_day: date) -> PlanResult:
         source=source,
         fallback_used=fallback_used,
         warnings=warnings,
+        source_details=source_details,
     )
 
 
@@ -442,6 +444,8 @@ def render_plan(plan: PlanResult) -> str:
     lines.append(f"- {plan.source_status}")
     if plan.fallback_used:
         lines.append("- Fallback aktiv: JSON-Beispieldaten wurden verwendet.")
+    for detail in plan.source_details:
+        lines.append(f"- {detail}")
     for warning in plan.warnings:
         lines.append(f"- Warnung: {warning}")
     lines.append("")
