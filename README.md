@@ -1,113 +1,112 @@
-# Nico Day Planner
+# Nico Day Planner v0.5
 
-Persönlicher Tagesplaner als Dry-Run: Jeden Abend um 23:00 Uhr sollen offene Todoist-Aufgaben und feste Google-Kalender-Termine für den nächsten Tag ausgewertet werden. Daraus entsteht ein realistischer Tagesplan als Textvorschlag.
+Persönlicher Tagesplaner als lokaler Dry-Run. Version 0.5 erzeugt jeden Abend einen realistischen Textvorschlag für den nächsten Tag, ohne externe Daten zu verändern.
 
-## Status
+## Status und Sicherheitsgrenzen
 
-Version 1 ist bewusst read-only:
+Version 0.5 ist bewusst klein und sicher:
 
-- Es wird nichts in Google Kalender geschrieben, geändert oder gelöscht.
+- Standardquelle ist lokales JSON (`data/example_tasks.json`).
+- Optional können offene Todoist-Aufgaben read-only gelesen werden.
+- Wenn `TODOIST_API_TOKEN` fehlt oder Todoist nicht lesbar ist, fällt der Planer sauber auf JSON zurück.
+- Es gibt keinen Google-Kalender-Zugriff.
 - Es werden keine Todoist-Aufgaben verändert, abgeschlossen, verschoben oder gelöscht.
-- Der Plan wird nur als Textvorschlag erzeugt.
+- Es werden keine Secrets ins Repository geschrieben.
+- Der Plan ist nur ein Vorschlag und muss manuell geprüft werden.
 
 ## Dateien
 
 - `AGENTS.md`: Dauerhafte Projektregeln und Sicherheitsvorgaben.
-- `rules.yaml`: Konfigurierbare Planungsregeln.
-- `planner_prompt.md`: Täglicher Prompt für die Planerstellung.
-- `scripts/dry_run_plan.py`: Lokaler Dry-Run-Planer mit Beispiel-Daten.
-- `data/example_tasks.json`: Lokale Beispiel-Aufgaben ohne Todoist-Zugriff.
-- `data/example_calendar.json`: Lokale Beispiel-Termine ohne Google-Kalender-Zugriff.
+- `README.md`: Bedienung, Status und Tests.
+- `rules.yaml`: Konfigurierbare Planungsregeln für Version 0.5.
+- `planner_prompt.md`: Prompt-Vorlage für spätere LLM-Planung.
+- `data/example_tasks.json`: Lokale Beispiel-Aufgaben.
+- `data/example_calendar.json`: Lokale Beispiel-Blocker; kein Google-Kalender.
+- `scripts/dry_run_plan.py`: Lokaler Planer mit JSON-Default und optionalem Todoist-Read-only-Modus.
+- `scripts/todoist_client.py`: Minimaler Todoist-Client mit ausschließlich lesendem `GET /rest/v2/tasks`.
 
-## Planungsregeln
-
-Der Planer arbeitet mit diesen Grundregeln:
-
-- Planung für morgen zwischen 09:00 und 23:00 Uhr.
-- Feste Google-Kalender-Termine blockieren Zeitfenster und dürfen nie überschrieben werden.
-- P1-Aufgaben werden zuerst eingeplant.
-- Aufgaben ohne Dauer werden geschätzt und entsprechend markiert.
-- Aufgaben über 120 Minuten werden nicht automatisch eingeplant, sondern zur Zerlegung vorgeschlagen.
-- Werkstatt-Diagnose wird bevorzugt vormittags oder nachmittags geplant.
-- Buchhaltung wird nicht nach 21:00 Uhr geplant.
-- Haushalt wird bevorzugt als kleiner Lückenfüller genutzt.
-- Privat/Gesundheit darf nicht vollständig verdrängt werden.
-- Maximal 70 Prozent des freien Tages werden verplant.
-- Es werden täglich Puffer eingebaut.
-- Am Ende wird immer eine Liste „nicht eingeplant“ ausgegeben.
-
-## Kategorien
-
-- Werkstatt
-- Studio
-- ALEGRA
-- Haushalt
-- Privat
-- LIVE
-- Soundwerk
-- Buchhaltung
-
-## Lokaler Dry-Run-Test
-
-Der aktuelle Dry-Run nutzt ausschließlich lokale JSON-Dateien:
-
-- `data/example_tasks.json` für Beispiel-Aufgaben aus allen Kategorien.
-- `data/example_calendar.json` für feste Beispiel-Termine für morgen.
-
-Es werden keine Daten aus Todoist oder Google Kalender gelesen und es wird nichts geschrieben.
-
-Test ausführen:
+## Schnellstart
 
 ```bash
 python3 scripts/dry_run_plan.py
 ```
 
-Das Script gibt einen Tagesplan als Markdown-Text aus. Dabei werden freie Zeitfenster zwischen 09:00 und 23:00 Uhr berechnet, feste Termine blockiert, maximal 70 Prozent der freien Zeit verplant und Aufgaben über 120 Minuten unter „Vorschläge zur Zerlegung“ ausgegeben.
+Das ist identisch mit:
 
-## Todoist read-only anbinden
-
-1. Erstelle in Todoist einen API-Token unter `Settings` → `Integrations` → `Developer`.
-2. Speichere den Token lokal als Umgebungsvariable:
-
-   ```bash
-   export TODOIST_API_TOKEN="dein-token"
-   ```
-
-3. Für Version 1 nur lesende Endpunkte verwenden, zum Beispiel offene Aufgaben abrufen.
-4. Keine Endpunkte zum Abschließen, Aktualisieren, Verschieben oder Löschen von Aufgaben verwenden.
-5. Später kann `scripts/dry_run_plan.py` die Aufgaben laden und in ein neutrales Eingabeformat für den Prompt umwandeln.
-
-## Google Kalender read-only anbinden
-
-1. Lege in der Google Cloud Console ein Projekt an.
-2. Aktiviere die Google Calendar API.
-3. Erstelle OAuth-Client-Zugangsdaten für eine Desktop-App oder eine geeignete lokale Anwendung.
-4. Lade die OAuth-Credentials herunter und speichere sie lokal, zum Beispiel als `credentials/google-calendar.json`.
-5. Verwende ausschließlich den Scope:
-
-   ```text
-   https://www.googleapis.com/auth/calendar.readonly
-   ```
-
-6. Rufe nur Termine für den nächsten Tag ab.
-7. Verwende diese Termine als feste Blocker im Plan.
-8. In Version 1 keine Schreib-Scopes wie `calendar.events` oder `calendar` verwenden.
-
-## Automatisierung um 23:00 Uhr
-
-Eine einfache lokale Cron-Variante könnte später so aussehen:
-
-```cron
-0 23 * * * cd /pfad/zu/nico-day-planner && python3 scripts/dry_run_plan.py >> logs/dry_run_plan.log 2>&1
+```bash
+python3 scripts/dry_run_plan.py --source json
 ```
 
-Vor der Automatisierung sollten Todoist- und Google-Kalender-Zugriff lokal erfolgreich im Read-only-Modus getestet werden.
+Optionaler Todoist-Read-only-Lauf:
 
-## Nächste Ausbaustufen
+```bash
+export TODOIST_API_TOKEN="dein-lokaler-token"
+python3 scripts/dry_run_plan.py --source todoist
+```
 
-- Todoist-Aufgaben read-only laden.
-- Google-Kalender-Termine read-only laden.
-- Daten normalisieren und Kategorien erkennen.
-- Prompt mit realen Eingaben ausführen.
-- Tagesplan als Markdown-Datei speichern.
-- Optional Benachrichtigung per E-Mail, Messenger oder lokaler Datei ergänzen.
+Ohne `TODOIST_API_TOKEN` wird kein Fehler geworfen; der Planer meldet den fehlenden Token und nutzt lokale JSON-Beispieldaten.
+
+## Planungsregeln in Version 0.5
+
+Der Planer berücksichtigt folgende Regeln:
+
+- Planung nur für morgen zwischen 09:00 und 23:00 Uhr.
+- Montag 09:00–17:00: Werkstatt Mengen.
+- Dienstag 09:00–14:00: Werkstatt; 14:00–16:00: Soundwerk.
+- Mittwoch 09:00–14:00: Werkstatt; 14:00–18:30: Soundwerk.
+- Donnerstag 09:00–12:00: Werkstatt; 14:00–18:00 und 20:00–23:00: ALEGRA/Producing Alex/Nico im Studio Aulendorf.
+- Freitag 09:00–17:00: Werkstatt.
+- Samstag flexibel.
+- Sonntag frei / Haushalt / Büro.
+- Fahrt Mengen ↔ Aulendorf blockiert 60 Minuten, wenn passende Tagesblöcke direkt aufeinander folgen.
+- Admin, Buchhaltung und Krankenkasse werden bevorzugt abends und nicht nach 21:00 Uhr geplant.
+- Soundwerk-Planung wird nur direkt in der Stunde vor Unterricht eingeplant.
+- Werkstattdiagnosen erhalten 15 Minuten Reset-Puffer.
+- Maximal 6 Hauptaufgaben und 2 Mini-Tasks werden automatisch eingeplant.
+- Maximal 70 Prozent der freien Zeit werden aktiv verplant.
+- Aufgaben über 120 Minuten werden nicht vollständig eingeplant, sondern zur Zerlegung vorgeschlagen.
+- Aufgaben ohne Dauer erhalten eine geschätzte Dauer und werden klar markiert.
+- Am Ende erscheint immer eine Liste „Nicht eingeplant“.
+
+## Datenformat Aufgaben
+
+`data/example_tasks.json` enthält eine Liste mit Aufgaben:
+
+```json
+{
+  "id": "task-001",
+  "title": "Fehlerdiagnose Verstärker durchführen",
+  "category": "Werkstatt",
+  "priority": "P1",
+  "duration_minutes": 90,
+  "notes": "Optionaler Hinweis"
+}
+```
+
+`duration_minutes` darf `null` sein. Dann schätzt der Planer 30 Minuten und markiert die Aufgabe im Output.
+
+## Datenformat lokale Kalender-Blocker
+
+`data/example_calendar.json` enthält nur lokale Beispiel-Blocker im Tagesformat:
+
+```json
+{
+  "id": "event-001",
+  "title": "Morgenroutine / Frühstück",
+  "calendar": "Privat",
+  "start": "09:00",
+  "end": "09:30"
+}
+```
+
+Diese Datei ist kein Google-Kalender-Export und löst keinen Google-Zugriff aus.
+
+## Tests
+
+```bash
+python3 -m json.tool data/example_tasks.json >/dev/null
+python3 -m json.tool data/example_calendar.json >/dev/null
+python3 -m py_compile scripts/dry_run_plan.py
+python3 scripts/dry_run_plan.py --source json
+python3 scripts/dry_run_plan.py --source todoist
+```
