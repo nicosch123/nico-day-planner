@@ -5,7 +5,7 @@
     "category": "Werkstatt",
     "priority": "P1",
     "duration_minutes": 90,
-    "notes": "Werkstatt-Diagnose, bevorzugt nicht spät abends."
+    "notes": "Werkstatt-Diagnose, danach 15 Minuten Reset-Puffer."
   },
   {
     "id": "task-002",
@@ -46,7 +46,7 @@
   },
   {
     "id": "task-007",
-    "title": "Soundwerk Materialliste prüfen",
+    "title": "Soundwerk Materialliste für Unterricht prüfen",
     "category": "Soundwerk",
     "priority": "P2",
     "duration_minutes": null
@@ -71,5 +71,13 @@
     "category": "Werkstatt",
     "priority": "P3",
     "duration_minutes": 40
+  },
+  {
+    "id": "task-011",
+    "title": "Krankenkasse Unterlagen prüfen",
+    "category": "Buchhaltung",
+    "priority": "P2",
+    "duration_minutes": 30,
+    "notes": "Admin/Krankenkasse bevorzugt abends."
   }
 ]

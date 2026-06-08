@@ -1,7 +1,13 @@
-version: 1
+version: "0.5"
 mode: dry_run
 locale: de-DE
 timezone: Europe/Berlin
+
+safety:
+  dry_run_only: true
+  google_calendar_access: none
+  todoist_access: read_only
+  never_write_secrets_to_repo: true
 
 planning_window:
   target_day: tomorrow
@@ -9,13 +15,18 @@ planning_window:
   end: "23:00"
 
 sources:
+  default: json
+  json:
+    tasks_path: data/example_tasks.json
+    calendar_path: data/example_calendar.json
   todoist:
     enabled: true
     access: read_only
+    token_env_var: TODOIST_API_TOKEN
+    fallback_source: json
   google_calendar:
-    enabled: true
-    access: read_only
-    fixed_events_are_blockers: true
+    enabled: false
+    access: none
 
 categories:
   - Werkstatt
@@ -27,18 +38,79 @@ categories:
   - Soundwerk
   - Buchhaltung
 
+weekly_structure:
+  monday:
+    - title: Werkstatt Mengen
+      start: "09:00"
+      end: "17:00"
+      location: Mengen
+      categories: [Werkstatt]
+  tuesday:
+    - title: Werkstatt
+      start: "09:00"
+      end: "14:00"
+      location: Mengen
+      categories: [Werkstatt]
+    - title: Soundwerk Unterricht
+      start: "14:00"
+      end: "16:00"
+      location: Aulendorf
+      categories: [Soundwerk]
+  wednesday:
+    - title: Werkstatt
+      start: "09:00"
+      end: "14:00"
+      location: Mengen
+      categories: [Werkstatt]
+    - title: Soundwerk Unterricht
+      start: "14:00"
+      end: "18:30"
+      location: Aulendorf
+      categories: [Soundwerk]
+  thursday:
+    - title: Werkstatt
+      start: "09:00"
+      end: "12:00"
+      location: Mengen
+      categories: [Werkstatt]
+    - title: ALEGRA/Producing Alex/Nico im Studio Aulendorf
+      start: "14:00"
+      end: "18:00"
+      location: Aulendorf
+      categories: [ALEGRA, Studio]
+    - title: ALEGRA/Producing Alex/Nico im Studio Aulendorf
+      start: "20:00"
+      end: "23:00"
+      location: Aulendorf
+      categories: [ALEGRA, Studio]
+  friday:
+    - title: Werkstatt
+      start: "09:00"
+      end: "17:00"
+      location: Mengen
+      categories: [Werkstatt]
+  saturday:
+    flexible: true
+  sunday:
+    title: Frei / Haushalt / Büro
+    categories: [Haushalt, Buchhaltung, Privat]
+
+travel:
+  Mengen_Aulendorf_minutes: 60
+  blocks_time: true
+
 prioritization:
-  todoist_priority_order:
-    - P1
-    - P2
-    - P3
-    - P4
+  todoist_priority_order: [P1, P2, P3, P4]
   schedule_p1_first: true
 
 capacity:
   max_free_time_planned_percent: 70
+  max_main_tasks: 6
+  max_mini_tasks: 2
+  mini_task_max_minutes: 15
   include_daily_buffers: true
   default_buffer_minutes: 15
+  werkstatt_diagnosis_reset_buffer_minutes: 15
 
 estimation:
   estimate_missing_durations: true
@@ -49,27 +121,31 @@ estimation:
 
 category_rules:
   Werkstatt:
-    diagnosis_preferred_windows:
-      - "09:00-12:00"
-      - "13:00-18:00"
+    diagnosis_preferred_windows: ["09:00-12:00", "13:00-18:00"]
+    diagnosis_reset_buffer_minutes: 15
     avoid_late_night: true
   Buchhaltung:
+    preferred_window: evening
     latest_end_time: "21:00"
+    aliases: [Admin, Krankenkasse]
   Haushalt:
     prefer_gap_filler: true
+    preferred_days: [sunday]
     preferred_max_block_minutes: 30
   Privat:
     protect_health_and_private_time: true
+  Soundwerk:
+    planning_only_in_hour_before_lesson: true
   Studio: {}
   ALEGRA: {}
   LIVE: {}
-  Soundwerk: {}
 
 output:
   format: markdown
   include_sections:
     - assumptions
-    - fixed_calendar_events
+    - source_status
+    - fixed_blocks
     - proposed_day_plan
     - buffers
     - not_scheduled

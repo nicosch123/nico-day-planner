@@ -8,30 +8,16 @@
   },
   {
     "id": "event-002",
-    "title": "Kundentermin Werkstatt",
-    "calendar": "Arbeit",
-    "start": "11:00",
-    "end": "12:15"
+    "title": "Mittagspause",
+    "calendar": "Privat",
+    "start": "12:15",
+    "end": "13:00"
   },
   {
     "id": "event-003",
-    "title": "Mittagspause",
+    "title": "Abendessen / Pause",
     "calendar": "Privat",
-    "start": "13:00",
-    "end": "13:45"
-  },
-  {
-    "id": "event-004",
-    "title": "Studio Call",
-    "calendar": "Studio",
-    "start": "16:30",
-    "end": "17:15"
-  },
-  {
-    "id": "event-005",
-    "title": "Abendtermin",
-    "calendar": "Privat",
-    "start": "20:00",
-    "end": "20:45"
+    "start": "18:30",
+    "end": "19:15"
   }
 ]
