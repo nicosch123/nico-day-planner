@@ -12,9 +12,10 @@ import os
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-TODOIST_API_URL = "https://api.todoist.com/rest/v2/tasks"
+TODOIST_API_URL = "https://api.todoist.com/api/v1/tasks"
 TOKEN_ENV_VAR = "TODOIST_API_TOKEN"
 DEFAULT_DURATION_MINUTES = 30
 CATEGORY_LABELS = {
@@ -94,7 +95,7 @@ def _duration_minutes(task: dict[str, Any]) -> int | None:
 
 
 def normalize_todoist_task(task: dict[str, Any]) -> dict[str, Any]:
-    """Map one Todoist REST task to the planner's neutral task schema."""
+    """Map one Todoist task to the planner's neutral task schema."""
     description = task.get("description") or ""
     normalized: dict[str, Any] = {
         "id": str(task.get("id", "todoist-unknown")),
@@ -108,10 +109,14 @@ def normalize_todoist_task(task: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def fetch_open_tasks(token: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
-    """Fetch open Todoist tasks via the official read endpoint only."""
+def _read_todoist_page(token: str, cursor: str | None, timeout_seconds: int) -> Any:
+    """Read one Todoist tasks page via GET without mutating Todoist data."""
+    url = TODOIST_API_URL
+    if cursor:
+        url = f"{TODOIST_API_URL}?{urlencode({'cursor': cursor})}"
+
     request = Request(
-        TODOIST_API_URL,
+        url,
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -129,14 +134,44 @@ def fetch_open_tasks(token: str, timeout_seconds: int = 20) -> list[dict[str, An
         raise TodoistReadError("Todoist read-only request timed out.") from exc
 
     try:
-        payload = json.loads(raw_body)
+        return json.loads(raw_body)
     except json.JSONDecodeError as exc:
         raise TodoistReadError("Todoist returned invalid JSON.") from exc
 
-    if not isinstance(payload, list):
-        raise TodoistReadError("Todoist returned an unexpected response shape.")
 
-    return [normalize_todoist_task(task) for task in payload if isinstance(task, dict)]
+def _tasks_and_next_cursor(payload: Any) -> tuple[list[dict[str, Any]], str | None]:
+    """Support both list responses and paginated object responses from Todoist."""
+    if isinstance(payload, list):
+        return [task for task in payload if isinstance(task, dict)], None
+
+    if isinstance(payload, dict):
+        results = payload.get("results")
+        if not isinstance(results, list):
+            raise TodoistReadError("Todoist returned an unexpected response shape.")
+        next_cursor = payload.get("next_cursor")
+        tasks = [task for task in results if isinstance(task, dict)]
+        return tasks, str(next_cursor) if next_cursor else None
+
+    raise TodoistReadError("Todoist returned an unexpected response shape.")
+
+
+def fetch_open_tasks(token: str, timeout_seconds: int = 20) -> list[dict[str, Any]]:
+    """Fetch all open Todoist tasks via the official read endpoint only."""
+    normalized_tasks: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+
+    while True:
+        payload = _read_todoist_page(token, cursor, timeout_seconds)
+        tasks, next_cursor = _tasks_and_next_cursor(payload)
+        normalized_tasks.extend(normalize_todoist_task(task) for task in tasks)
+
+        if not next_cursor:
+            return normalized_tasks
+        if next_cursor in seen_cursors:
+            raise TodoistReadError("Todoist pagination returned a repeated cursor.")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
 
 
 def load_todoist_tasks_from_env() -> TodoistReadResult:
