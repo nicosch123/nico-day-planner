@@ -24,7 +24,10 @@ TODOIST_SECTIONS_URL = f"{TODOIST_API_BASE_URL}/sections"
 TODOIST_LABELS_URL = f"{TODOIST_API_BASE_URL}/labels"
 TOKEN_ENV_VAR = "TODOIST_API_TOKEN"
 DEFAULT_DURATION_MINUTES = 30
-DURATION_LABEL_PATTERN = re.compile(r"^\s*(?P<amount>\d+(?:[.,]\d+)?)\s*(?P<unit>m|min|h|std|stunde|stunden)\s*$", re.IGNORECASE)
+DURATION_LABEL_PATTERN = re.compile(
+    r"^\s*(?P<amount>\d+(?:[.,]\d+)?)\s*(?P<unit>m|min|h|std|stunde|stunden)\s*$",
+    re.IGNORECASE,
+)
 DURATION_DESCRIPTION_PATTERN = re.compile(
     r"(?:^|\b)(?:dauer|duration)\s*:\s*(?P<amount>\d+(?:[.,]\d+)?)\s*(?P<unit>m|min|h|std|stunde|stunden)?\b",
     re.IGNORECASE,
@@ -345,7 +348,11 @@ def _analysis_details(
     )
     duration_source_counts = Counter(str(task.get("duration_source", "missing")) for task in tasks)
     missing_duration_count = duration_source_counts.get("missing", 0)
-    missing_titles = [str(task.get("title", "Ohne Titel")) for task in tasks if task.get("duration_minutes") is None]
+    missing_titles = [
+        str(task.get("title", "Ohne Titel"))
+        for task in tasks
+        if task.get("duration_minutes") is None
+    ]
     first_missing = "; ".join(missing_titles[:20]) if missing_titles else "Keine"
     return (
         f"Todoist Projekte read-only: {project_count} geladen.",
