@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
@@ -93,13 +94,14 @@ def _category_from_task(
     task: dict[str, Any],
     project_map: dict[str, str] | None = None,
     section_map: dict[str, str] | None = None,
+    labels: list[str] | None = None,
 ) -> str:
     """Infer category, preferring project name, then section name, labels, title, and notes."""
     project_map = project_map or {}
     section_map = section_map or {}
     project_name = project_map.get(str(task.get("project_id", "")), "")
     section_name = section_map.get(str(task.get("section_id", "")), "")
-    labels = [str(label) for label in task.get("labels", [])]
+    labels = labels or [str(label) for label in task.get("labels", [])]
     title_and_notes = " ".join([str(task.get("content", "")), str(task.get("description", ""))])
 
     for value in (project_name, section_name, " ".join(labels), title_and_notes):
@@ -109,8 +111,38 @@ def _category_from_task(
     return "Privat"
 
 
-def _duration_minutes(task: dict[str, Any]) -> int | None:
-    """Read Todoist duration if present; otherwise return None for estimation."""
+SUPPORTED_DURATION_MINUTES = {15, 30, 45, 60, 90, 120}
+DURATION_LABEL_RE = re.compile(
+    r"^(?P<minutes>\d+)m(?:in)?$|^(?P<hours>\d+(?:[.,]\d+)?)h$",
+    re.IGNORECASE,
+)
+DESCRIPTION_DURATION_RE = re.compile(
+    r"(?:^|\b)(?:dauer|duration)\s*:\s*"
+    r"(?P<amount>\d+(?:[.,]\d+)?)\s*"
+    r"(?P<unit>m|min|minute|minutes|h|hour|hours)?\b",
+    re.IGNORECASE,
+)
+
+
+def _supported_minutes_from_amount(amount: str, unit: str | None) -> int | None:
+    """Convert a supported textual duration amount to minutes."""
+    normalized_amount = amount.replace(",", ".")
+    try:
+        value = float(normalized_amount)
+    except ValueError:
+        return None
+
+    if unit and unit.lower() in {"h", "hour", "hours"}:
+        value *= 60
+
+    minutes = int(value)
+    if minutes != value:
+        return None
+    return minutes if minutes in SUPPORTED_DURATION_MINUTES else None
+
+
+def _native_duration_minutes(task: dict[str, Any]) -> int | None:
+    """Read Todoist native duration if present; otherwise return None."""
     duration = task.get("duration")
     if not isinstance(duration, dict):
         return None
@@ -122,22 +154,65 @@ def _duration_minutes(task: dict[str, Any]) -> int | None:
     except (TypeError, ValueError):
         return None
 
-    if unit == "minute":
+    if unit in {"minute", "minutes"}:
         return amount_int
-    if unit == "day":
+    if unit in {"day", "days"}:
         return amount_int * 8 * 60
     return None
+
+
+def _duration_from_labels(labels: list[str]) -> int | None:
+    """Return duration encoded by a supported Todoist label."""
+    for label in labels:
+        match = DURATION_LABEL_RE.fullmatch(label.strip())
+        if not match:
+            continue
+        if match.group("minutes"):
+            return _supported_minutes_from_amount(match.group("minutes"), "m")
+        hours = match.group("hours")
+        if hours:
+            return _supported_minutes_from_amount(hours, "h")
+    return None
+
+
+def _duration_from_description(description: str) -> int | None:
+    """Return duration encoded in the task description."""
+    match = DESCRIPTION_DURATION_RE.search(description)
+    if not match:
+        return None
+    return _supported_minutes_from_amount(match.group("amount"), match.group("unit"))
+
+
+def _duration_minutes(task: dict[str, Any], labels: list[str]) -> tuple[int | None, str]:
+    """Resolve duration by priority: native Todoist, label, description, missing."""
+    native_minutes = _native_duration_minutes(task)
+    if native_minutes is not None:
+        return native_minutes, "native"
+
+    label_minutes = _duration_from_labels(labels)
+    if label_minutes is not None:
+        return label_minutes, "label"
+
+    description_minutes = _duration_from_description(str(task.get("description") or ""))
+    if description_minutes is not None:
+        return description_minutes, "description"
+
+    return None, "missing"
 
 
 def normalize_todoist_task(
     task: dict[str, Any],
     project_map: dict[str, str] | None = None,
     section_map: dict[str, str] | None = None,
+    label_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Map one Todoist task to the planner's neutral task schema."""
     description = task.get("description") or ""
     project_map = project_map or {}
     section_map = section_map or {}
+    label_map = label_map or {}
+    labels = [label_map.get(str(label), str(label)) for label in task.get("labels", [])]
+    duration_minutes, duration_source = _duration_minutes(task, labels)
     project_id = str(task.get("project_id", ""))
     section_id = str(task.get("section_id", ""))
     project_name = project_map.get(project_id, "")
@@ -145,9 +220,10 @@ def normalize_todoist_task(
     normalized: dict[str, Any] = {
         "id": str(task.get("id", "todoist-unknown")),
         "title": str(task.get("content", "Ohne Titel")),
-        "category": _category_from_task(task, project_map, section_map),
+        "category": _category_from_task(task, project_map, section_map, labels),
         "priority": _priority_from_todoist(task.get("priority")),
-        "duration_minutes": _duration_minutes(task),
+        "duration_minutes": duration_minutes,
+        "duration_source": duration_source,
     }
     if description:
         normalized["notes"] = str(description)
@@ -255,10 +331,11 @@ def fetch_open_tasks(
     timeout_seconds: int = 20,
     project_map: dict[str, str] | None = None,
     section_map: dict[str, str] | None = None,
+    label_map: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch all open Todoist tasks via the official read endpoint only."""
     tasks = _fetch_collection(TODOIST_API_URL, token, timeout_seconds)
-    return [normalize_todoist_task(task, project_map, section_map) for task in tasks]
+    return [normalize_todoist_task(task, project_map, section_map, label_map) for task in tasks]
 
 
 def _analysis_details(
@@ -271,13 +348,24 @@ def _analysis_details(
     category_summary = ", ".join(
         f"{category}={category_counts.get(category, 0)}" for category in SUPPORTED_CATEGORIES
     )
-    missing_duration_count = sum(1 for task in tasks if task.get("duration_minutes") is None)
+    duration_counts = Counter(str(task.get("duration_source", "missing")) for task in tasks)
+    missing_duration_count = duration_counts.get("missing", 0)
+    missing_titles = [
+        str(task.get("title", "Ohne Titel"))
+        for task in tasks
+        if task.get("duration_source") == "missing"
+    ][:20]
+    missing_preview = "; ".join(missing_titles) if missing_titles else "Keine"
     return (
         f"Todoist Projekte read-only: {project_count} geladen.",
         f"Todoist Sections read-only: {section_count} geladen.",
         f"Todoist Labels read-only: {label_count} geladen.",
         f"Kategorie-Verteilung nach Projekt/Section/Label/Titel-Mapping: {category_summary}.",
+        f"Dauer aus nativer Todoist-Dauer: {duration_counts.get('native', 0)}.",
+        f"Dauer aus Label: {duration_counts.get('label', 0)}.",
+        f"Dauer aus Beschreibung: {duration_counts.get('description', 0)}.",
         f"Aufgaben ohne erkannte Dauer: {missing_duration_count}.",
+        f"Erste 20 Aufgaben ohne Dauer: {missing_preview}.",
     )
 
 
@@ -294,7 +382,12 @@ def load_todoist_tasks_from_env() -> TodoistReadResult:
     project_map = fetch_projects(token)
     section_map = fetch_sections(token)
     label_map = fetch_labels(token)
-    tasks = fetch_open_tasks(token, project_map=project_map, section_map=section_map)
+    tasks = fetch_open_tasks(
+        token,
+        project_map=project_map,
+        section_map=section_map,
+        label_map=label_map,
+    )
     return TodoistReadResult(
         tasks=tasks,
         status=f"Todoist read-only: {len(tasks)} offene Aufgabe(n) geladen.",

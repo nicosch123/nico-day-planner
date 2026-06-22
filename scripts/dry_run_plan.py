@@ -425,6 +425,17 @@ def render_task(task: Task) -> str:
     return f"{task.title} [{task.category}, {task.priority}, {task.duration_minutes} Min.]{estimated}"
 
 
+def append_source_details(lines: list[str], source_details: tuple[str, ...]) -> None:
+    """Render optional source analysis details directly after the source status."""
+    if not source_details:
+        return
+
+    lines.append("")
+    lines.append("## Todoist-Analyse")
+    for detail in source_details:
+        lines.append(f"- {detail}")
+
+
 def render_plan(plan: PlanResult) -> str:
     lines: list[str] = []
     weekday = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][plan.target_day.weekday()]
@@ -444,10 +455,9 @@ def render_plan(plan: PlanResult) -> str:
     lines.append(f"- {plan.source_status}")
     if plan.fallback_used:
         lines.append("- Fallback aktiv: JSON-Beispieldaten wurden verwendet.")
-    for detail in plan.source_details:
-        lines.append(f"- {detail}")
     for warning in plan.warnings:
         lines.append(f"- Warnung: {warning}")
+    append_source_details(lines, plan.source_details)
     lines.append("")
 
     lines.append("## Blockierte Zeiten")
