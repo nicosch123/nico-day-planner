@@ -1,0 +1,6 @@
+# Local credentials/tokens (never commit)
+scripts/__pycache__/
+.google-calendar-token.json
+google-calendar-token.json
+token.json
+credentials.json
