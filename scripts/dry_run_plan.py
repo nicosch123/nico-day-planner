@@ -149,8 +149,10 @@ def load_json(path: Path) -> Any:
 
 def normalize_task(raw: dict[str, Any]) -> Task:
     raw_duration = raw.get("duration_minutes")
-    estimated = raw_duration is None
+    estimated = raw_duration is None or raw.get("duration_source") == "estimated"
     duration = DEFAULT_ESTIMATED_DURATION_MINUTES if estimated else int(raw_duration)
+    if raw_duration is not None:
+        duration = int(raw_duration)
     return Task(
         id=str(raw.get("id", "unknown")),
         title=str(raw.get("title", "Ohne Titel")),
@@ -444,8 +446,9 @@ def render_plan(plan: PlanResult) -> str:
     lines.append(f"- {plan.source_status}")
     if plan.fallback_used:
         lines.append("- Fallback aktiv: JSON-Beispieldaten wurden verwendet.")
-    for detail in plan.source_details:
-        lines.append(f"- {detail}")
+    if plan.source_details:
+        for detail in plan.source_details:
+            lines.append(f"- {detail}")
     for warning in plan.warnings:
         lines.append(f"- Warnung: {warning}")
     lines.append("")

@@ -115,6 +115,73 @@ DESCRIPTION_DURATION_RE = re.compile(
     r"(?:^|\b)(?:dauer|duration)\s*:\s*(?P<amount>\d+(?:[.,]\d+)?)\s*(?P<unit>m|min|minute|minutes|h|hour|hours)?\b",
     re.IGNORECASE,
 )
+LARGE_REPAIR_KEYWORDS = (
+    "echolette",
+    "leslie",
+    "wurlitzer",
+    "prophet",
+    "hk audio",
+    "db technologies",
+    "live-set",
+    "durchführen",
+    "finalisieren",
+    "komplett",
+)
+SMALL_CHECK_KEYWORDS = (
+    "prüfen",
+    "checken",
+    "beobachten",
+    "kurz",
+    "melden",
+    "rausbringen",
+    "gießen",
+    "wasser",
+    "pflanze",
+    "nachricht",
+    "rückfrage",
+)
+ADMIN_FOCUS_KEYWORDS = (
+    "krankenkasse",
+    "versicherung",
+    "formular",
+    "antrag",
+    "unterlagen",
+)
+STRUCTURED_WORK_KEYWORDS = (
+    "lexware",
+    "geschäftskonto",
+    "buchhaltung",
+    "website",
+    "onepager",
+    "unterrichtsplanung",
+    "aufräumen",
+    "foh-kurs",
+    "routing",
+    "dokumentieren",
+)
+DEEP_WORK_KEYWORDS = (
+    "reparatur",
+    "diagnose",
+    "weiterverfolgen",
+    "mix",
+    "producing",
+    "setup",
+    "vorbereiten",
+)
+CATEGORY_ESTIMATE_MINUTES = {
+    "Haushalt": 30,
+    "Privat": 30,
+    "Buchhaltung": 45,
+    "Soundwerk": 45,
+    "Studio": 60,
+    "ALEGRA": 60,
+    "LIVE": 60,
+    "Werkstatt": 90,
+}
+
+
+def _contains_any(haystack: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in haystack for keyword in keywords)
 
 
 def _minutes_from_amount(amount: str, unit: str | None) -> int | None:
@@ -174,8 +241,51 @@ def _duration_from_description(description: str) -> int | None:
     return _minutes_from_amount(match.group("amount"), match.group("unit"))
 
 
-def _duration_minutes(task: dict[str, Any], labels: list[str]) -> tuple[int | None, str]:
-    """Resolve duration by priority: native Todoist, label, description, missing."""
+def estimate_duration_minutes(
+    task: dict[str, Any],
+    category: str,
+    project_name: str = "",
+    section_name: str = "",
+) -> int:
+    """Estimate Todoist task duration deterministically from local task metadata."""
+    title = str(task.get("content") or task.get("title") or "")
+    description = str(task.get("description") or task.get("notes") or "")
+    haystack = " ".join([title, category, project_name, section_name, description]).casefold()
+
+    if _contains_any(haystack, LARGE_REPAIR_KEYWORDS):
+        return 120
+    if category == "Werkstatt" and _contains_any(haystack, ("reparatur", "diagnose")):
+        return 90
+    if category == "Buchhaltung" and _contains_any(haystack, ("lexware", "geschäftskonto")):
+        return 60
+    if _contains_any(haystack, SMALL_CHECK_KEYWORDS):
+        if category in {"Werkstatt", "LIVE", "Studio"} and _contains_any(
+            haystack,
+            LARGE_REPAIR_KEYWORDS + DEEP_WORK_KEYWORDS,
+        ):
+            return max(CATEGORY_ESTIMATE_MINUTES.get(category, DEFAULT_DURATION_MINUTES), 90)
+        return 15
+    if _contains_any(haystack, ADMIN_FOCUS_KEYWORDS):
+        return 45
+    if _contains_any(haystack, STRUCTURED_WORK_KEYWORDS):
+        return 60
+    if _contains_any(haystack, DEEP_WORK_KEYWORDS):
+        if category in {"Werkstatt", "Studio", "ALEGRA"}:
+            return 90
+        if category == "LIVE":
+            return 120
+        return 90
+    return CATEGORY_ESTIMATE_MINUTES.get(category, DEFAULT_DURATION_MINUTES)
+
+
+def _duration_minutes(
+    task: dict[str, Any],
+    labels: list[str],
+    category: str,
+    project_name: str = "",
+    section_name: str = "",
+) -> tuple[int | None, str]:
+    """Resolve duration by priority: native Todoist, label, description, estimated, missing."""
     native_minutes = _native_duration_minutes(task)
     if native_minutes is not None:
         return native_minutes, "native"
@@ -188,6 +298,9 @@ def _duration_minutes(task: dict[str, Any], labels: list[str]) -> tuple[int | No
     if description_minutes is not None:
         return description_minutes, "description"
 
+    estimated_minutes = estimate_duration_minutes(task, category, project_name, section_name)
+    if estimated_minutes in {15, 30, 45, 60, 90, 120}:
+        return estimated_minutes, "estimated"
     return None, "missing"
 
 
@@ -203,15 +316,16 @@ def normalize_todoist_task(
     section_map = section_map or {}
     label_map = label_map or {}
     labels = [label_map.get(str(label), str(label)) for label in task.get("labels", [])]
-    duration_minutes, duration_source = _duration_minutes(task, labels)
     project_id = str(task.get("project_id", ""))
     section_id = str(task.get("section_id", ""))
     project_name = project_map.get(project_id, "")
     section_name = section_map.get(section_id, "")
+    category = _category_from_task(task, project_map, section_map)
+    duration_minutes, duration_source = _duration_minutes(task, labels, category, project_name, section_name)
     normalized: dict[str, Any] = {
         "id": str(task.get("id", "todoist-unknown")),
         "title": str(task.get("content", "Ohne Titel")),
-        "category": _category_from_task(task, project_map, section_map),
+        "category": category,
         "priority": _priority_from_todoist(task.get("priority")),
         "duration_minutes": duration_minutes,
         "duration_source": duration_source,
@@ -343,6 +457,15 @@ def _analysis_details(
     missing_duration_count = duration_counts.get("missing", 0)
     missing_titles = [str(task.get("title", "Ohne Titel")) for task in tasks if task.get("duration_source") == "missing"][:20]
     missing_preview = "; ".join(missing_titles) if missing_titles else "Keine"
+    estimated_tasks = [task for task in tasks if task.get("duration_source") == "estimated"][:20]
+    estimated_preview = (
+        "; ".join(
+            f"{task.get('title', 'Ohne Titel')} [{task.get('category', 'Privat')}, {task.get('duration_minutes')} Min.]"
+            for task in estimated_tasks
+        )
+        if estimated_tasks
+        else "Keine"
+    )
     return (
         f"Todoist Projekte read-only: {project_count} geladen.",
         f"Todoist Sections read-only: {section_count} geladen.",
@@ -351,7 +474,9 @@ def _analysis_details(
         f"Dauer aus nativer Todoist-Dauer: {duration_counts.get("native", 0)}.",
         f"Dauer aus Label: {duration_counts.get("label", 0)}.",
         f"Dauer aus Beschreibung: {duration_counts.get("description", 0)}.",
-        f"Aufgaben ohne erkannte Dauer: {missing_duration_count}.",
+        f"Dauer automatisch geschätzt: {duration_counts.get("estimated", 0)}.",
+        f"Aufgaben ohne Dauer nach Schätzung: {missing_duration_count}.",
+        f"Erste 20 automatisch geschätzte Aufgaben mit Titel, Kategorie und geschätzter Dauer: {estimated_preview}.",
         f"Erste 20 Aufgaben ohne Dauer: {missing_preview}.",
     )
 
