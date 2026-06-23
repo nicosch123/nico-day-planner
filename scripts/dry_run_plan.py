@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Local dry-run planner for Nico Day Planner v0.5.
 
-Default source is JSON. Todoist can be used as a read-only source with
---source todoist. If TODOIST_API_TOKEN is missing, the script falls back to the
-local JSON examples. There is deliberately no Google Calendar access.
+Default task source is JSON. Todoist can be used as a read-only source with
+--source todoist. Calendar source defaults to local JSON; Google Calendar can
+be used read-only with --calendar-source google. If external credentials are
+missing, the script falls back to local JSON examples.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
+from google_calendar_client import GoogleCalendarReadError, load_calendar_events_for_date
 from todoist_client import TodoistReadError, load_todoist_tasks_from_env
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,9 +127,13 @@ class PlanResult:
     capacity_minutes: int
     planned_minutes: int
     source: str
+    calendar_source: str
+    calendar_status: str
+    calendar_fallback_used: bool = False
     fallback_used: bool = False
     warnings: list[str] = field(default_factory=list)
     source_details: tuple[str, ...] = field(default_factory=tuple)
+    calendar_details: tuple[str, ...] = field(default_factory=tuple)
 
 
 def parse_hhmm(value: str) -> time:
@@ -149,8 +155,8 @@ def load_json(path: Path) -> Any:
 
 def normalize_task(raw: dict[str, Any]) -> Task:
     raw_duration = raw.get("duration_minutes")
-    estimated = raw_duration is None
-    duration = DEFAULT_ESTIMATED_DURATION_MINUTES if estimated else int(raw_duration)
+    estimated = raw_duration is None or raw.get("duration_source") == "estimated"
+    duration = DEFAULT_ESTIMATED_DURATION_MINUTES if raw_duration is None else int(raw_duration)
     return Task(
         id=str(raw.get("id", "unknown")),
         title=str(raw.get("title", "Ohne Titel")),
@@ -169,7 +175,7 @@ def load_json_tasks() -> list[Task]:
     return [normalize_task(item) for item in payload if isinstance(item, dict)]
 
 
-def load_calendar_blocks(target_day: date) -> list[Block]:
+def load_json_calendar_blocks(target_day: date) -> list[Block]:
     payload = load_json(CALENDAR_PATH)
     if not isinstance(payload, list):
         raise ValueError(f"{CALENDAR_PATH} muss eine JSON-Liste enthalten.")
@@ -190,6 +196,34 @@ def load_calendar_blocks(target_day: date) -> list[Block]:
         )
     return blocks
 
+
+
+
+def normalize_calendar_event(raw: dict[str, Any]) -> Block:
+    return Block(
+        id=str(raw.get("id", "google-calendar-unknown")),
+        title=str(raw.get("title", "Termin")),
+        start=datetime.fromisoformat(str(raw["start"])),
+        end=datetime.fromisoformat(str(raw["end"])),
+        source=str(raw.get("source", "Google Calendar")),
+        location=str(raw.get("location", "")),
+    )
+
+
+def load_calendar_blocks_for_source(calendar_source: str, target_day: date) -> tuple[list[Block], str, bool, list[str], tuple[str, ...]]:
+    warnings: list[str] = []
+    if calendar_source == "json":
+        return load_json_calendar_blocks(target_day), "Kalender JSON: lokale Beispieltermine geladen.", False, warnings, ()
+
+    try:
+        result = load_calendar_events_for_date(target_day)
+    except GoogleCalendarReadError as exc:
+        warnings.append(f"Google Calendar konnte nicht gelesen werden ({exc}) – verwende lokale JSON-Kalenderdaten.")
+        return load_json_calendar_blocks(target_day), warnings[-1], True, warnings, ()
+
+    if result.used_fallback:
+        return load_json_calendar_blocks(target_day), result.status, True, warnings, result.status_details
+    return [normalize_calendar_event(event) for event in result.events], result.status, False, warnings, result.status_details
 
 def weekly_blocks(target_day: date) -> list[Block]:
     blocks: list[Block] = []
@@ -354,9 +388,13 @@ def load_tasks_for_source(source: str) -> tuple[list[Task], str, bool, list[str]
     return [normalize_task(task) for task in result.tasks], result.status, False, warnings, result.status_details
 
 
-def build_plan(source: str, target_day: date) -> PlanResult:
+def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResult:
     tasks, source_status, fallback_used, warnings, source_details = load_tasks_for_source(source)
-    fixed_blocks = load_calendar_blocks(target_day) + weekly_blocks(target_day)
+    calendar_blocks, calendar_status, calendar_fallback_used, calendar_warnings, calendar_details = load_calendar_blocks_for_source(
+        calendar_source, target_day
+    )
+    warnings.extend(calendar_warnings)
+    fixed_blocks = calendar_blocks + weekly_blocks(target_day)
     fixed_blocks += travel_blocks(fixed_blocks)
     fixed_blocks = merge_overlapping(fixed_blocks)
     free_windows = find_free_windows(target_day, fixed_blocks)
@@ -414,9 +452,13 @@ def build_plan(source: str, target_day: date) -> PlanResult:
         capacity_minutes=capacity_minutes,
         planned_minutes=planned_minutes,
         source=source,
+        calendar_source=calendar_source,
+        calendar_status=calendar_status,
+        calendar_fallback_used=calendar_fallback_used,
         fallback_used=fallback_used,
         warnings=warnings,
         source_details=source_details,
+        calendar_details=calendar_details,
     )
 
 
@@ -439,18 +481,23 @@ def render_plan(plan: PlanResult) -> str:
     lines.append(f"# Nico Day Planner v0.5 – Dry-Run für {weekday}, {plan.target_day.isoformat()}")
     lines.append("")
     lines.append("## Annahmen")
-    lines.append("- Version 0.5 ist ein lokaler Dry-Run: keine Google-Kalender-Abfrage und keine Schreibzugriffe.")
+    lines.append("- Version 0.5 ist ein lokaler Dry-Run: keine Kalender- oder Todoist-Schreibzugriffe.")
     lines.append("- Geplant wird nur zwischen 09:00 und 23:00 Uhr.")
     lines.append(f"- Freie Zeit: {free_minutes} Minuten; davon maximal 70 Prozent verplant: {plan.capacity_minutes} Minuten.")
     lines.append("- Maximal 6 Hauptaufgaben und 2 Mini-Tasks werden automatisch eingeplant.")
     lines.append("")
 
     lines.append("## Quellenstatus")
-    lines.append(f"- Gewählte Quelle: `{plan.source}`.")
+    lines.append(f"- Gewählte Aufgabenquelle: `{plan.source}`.")
     lines.append(f"- {plan.source_status}")
     if plan.fallback_used:
-        lines.append("- Fallback aktiv: JSON-Beispieldaten wurden verwendet.")
+        lines.append("- Aufgaben-Fallback aktiv: JSON-Beispielaufgaben wurden verwendet.")
     lines.extend(render_source_details(plan.source_details))
+    lines.append(f"- Kalenderquelle: `{plan.calendar_source}`.")
+    lines.append(f"- {plan.calendar_status}")
+    if plan.calendar_fallback_used:
+        lines.append("- Kalender-Fallback aktiv: JSON-Kalenderdaten wurden verwendet.")
+    lines.extend(render_source_details(plan.calendar_details))
     for warning in plan.warnings:
         lines.append(f"- Warnung: {warning}")
     lines.append("")
@@ -507,6 +554,12 @@ def parse_args() -> argparse.Namespace:
         help="Aufgabenquelle: lokale JSON-Daten oder Todoist read-only. Default: json.",
     )
     parser.add_argument(
+        "--calendar-source",
+        choices=("json", "google"),
+        default="json",
+        help="Kalenderquelle: lokale JSON-Daten oder Google Calendar read-only. Default: json.",
+    )
+    parser.add_argument(
         "--date",
         help="Optionales Zieldatum im Format YYYY-MM-DD. Default: morgen.",
     )
@@ -516,7 +569,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     target_day = date.fromisoformat(args.date) if args.date else date.today() + timedelta(days=1)
-    plan = build_plan(args.source, target_day)
+    plan = build_plan(args.source, target_day, args.calendar_source)
     print(render_plan(plan))
 
 
