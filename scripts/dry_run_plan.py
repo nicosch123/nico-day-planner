@@ -425,6 +425,12 @@ def render_task(task: Task) -> str:
     return f"{task.title} [{task.category}, {task.priority}, {task.duration_minutes} Min.]{estimated}"
 
 
+def render_source_details(source_details: tuple[str, ...]) -> list[str]:
+    if not source_details:
+        return []
+    return [f"- {detail}" for detail in source_details]
+
+
 def render_plan(plan: PlanResult) -> str:
     lines: list[str] = []
     weekday = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][plan.target_day.weekday()]
@@ -444,8 +450,7 @@ def render_plan(plan: PlanResult) -> str:
     lines.append(f"- {plan.source_status}")
     if plan.fallback_used:
         lines.append("- Fallback aktiv: JSON-Beispieldaten wurden verwendet.")
-    for detail in plan.source_details:
-        lines.append(f"- {detail}")
+    lines.extend(render_source_details(plan.source_details))
     for warning in plan.warnings:
         lines.append(f"- Warnung: {warning}")
     lines.append("")
