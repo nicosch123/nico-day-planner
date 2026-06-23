@@ -24,6 +24,40 @@ TODOIST_SECTIONS_URL = f"{TODOIST_API_BASE_URL}/sections"
 TODOIST_LABELS_URL = f"{TODOIST_API_BASE_URL}/labels"
 TOKEN_ENV_VAR = "TODOIST_API_TOKEN"
 DEFAULT_DURATION_MINUTES = 30
+ALLOWED_DURATION_MINUTES = (15, 30, 45, 60, 90, 120)
+SMALL_TASK_KEYWORDS = (
+    "pflanze",
+    "pflanzen",
+    "beobachten",
+    "prüfen",
+    "pruefen",
+    "kurz",
+    "melden",
+    "müll",
+    "muell",
+    "wasser",
+)
+LARGE_REPAIR_KEYWORDS = (
+    "echolette",
+    "leslie",
+    "wurlitzer",
+    "prophet",
+    "hk audio",
+    "db technologies",
+    "d&b technologies",
+)
+WORKSHOP_KEYWORDS = ("reparatur", "diagnose", "werkstatt")
+BOOKKEEPING_KEYWORDS = ("lexware", "geschäftskonto", "geschaeftskonto", "buchhaltung")
+CATEGORY_ESTIMATES = {
+    "Haushalt": 30,
+    "Privat": 30,
+    "Buchhaltung": 45,
+    "Soundwerk": 45,
+    "Studio": 90,
+    "ALEGRA": 90,
+    "LIVE": 90,
+    "Werkstatt": 90,
+}
 SUPPORTED_CATEGORIES = (
     "Werkstatt",
     "Studio",
@@ -174,8 +208,44 @@ def _duration_from_description(description: str) -> int | None:
     return _minutes_from_amount(match.group("amount"), match.group("unit"))
 
 
-def _duration_minutes(task: dict[str, Any], labels: list[str]) -> tuple[int | None, str]:
-    """Resolve duration by priority: native Todoist, label, description, missing."""
+def _clamp_to_allowed_duration(minutes: int) -> int:
+    """Return the nearest supported automatic estimate, never outside the allowed set."""
+    return min(ALLOWED_DURATION_MINUTES, key=lambda allowed: (abs(allowed - minutes), allowed))
+
+
+def _has_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    """Return whether any keyword occurs in already-normalized text."""
+    return any(keyword in text for keyword in keywords)
+
+
+def _estimate_duration_minutes(task: dict[str, Any], labels: list[str], category: str) -> int:
+    """Estimate a Todoist duration using local read-only planner rules."""
+    text = " ".join(
+        [
+            str(task.get("content", "")),
+            str(task.get("description", "")),
+            " ".join(labels),
+            category,
+        ]
+    ).lower()
+
+    is_large_work = category in {"Werkstatt", "LIVE", "Studio"} or _has_any_keyword(
+        text, LARGE_REPAIR_KEYWORDS + WORKSHOP_KEYWORDS
+    )
+    if _has_any_keyword(text, LARGE_REPAIR_KEYWORDS):
+        return 120
+    if _has_any_keyword(text, WORKSHOP_KEYWORDS):
+        return max(90, CATEGORY_ESTIMATES.get(category, DEFAULT_DURATION_MINUTES))
+    if _has_any_keyword(text, BOOKKEEPING_KEYWORDS):
+        return 60
+    if _has_any_keyword(text, SMALL_TASK_KEYWORDS) and not is_large_work:
+        return 15
+
+    return _clamp_to_allowed_duration(CATEGORY_ESTIMATES.get(category, DEFAULT_DURATION_MINUTES))
+
+
+def _duration_minutes(task: dict[str, Any], labels: list[str], category: str) -> tuple[int, str]:
+    """Resolve duration by priority: native Todoist, label, description, estimate."""
     native_minutes = _native_duration_minutes(task)
     if native_minutes is not None:
         return native_minutes, "native"
@@ -188,7 +258,7 @@ def _duration_minutes(task: dict[str, Any], labels: list[str]) -> tuple[int | No
     if description_minutes is not None:
         return description_minutes, "description"
 
-    return None, "missing"
+    return _estimate_duration_minutes(task, labels, category), "estimated"
 
 
 def normalize_todoist_task(
@@ -203,7 +273,8 @@ def normalize_todoist_task(
     section_map = section_map or {}
     label_map = label_map or {}
     labels = [label_map.get(str(label), str(label)) for label in task.get("labels", [])]
-    duration_minutes, duration_source = _duration_minutes(task, labels)
+    category = _category_from_task(task, project_map, section_map)
+    duration_minutes, duration_source = _duration_minutes(task, labels, category)
     project_id = str(task.get("project_id", ""))
     section_id = str(task.get("section_id", ""))
     project_name = project_map.get(project_id, "")
@@ -211,7 +282,7 @@ def normalize_todoist_task(
     normalized: dict[str, Any] = {
         "id": str(task.get("id", "todoist-unknown")),
         "title": str(task.get("content", "Ohne Titel")),
-        "category": _category_from_task(task, project_map, section_map),
+        "category": category,
         "priority": _priority_from_todoist(task.get("priority")),
         "duration_minutes": duration_minutes,
         "duration_source": duration_source,
@@ -341,18 +412,24 @@ def _analysis_details(
     )
     duration_counts = Counter(str(task.get("duration_source", "missing")) for task in tasks)
     missing_duration_count = duration_counts.get("missing", 0)
-    missing_titles = [str(task.get("title", "Ohne Titel")) for task in tasks if task.get("duration_source") == "missing"][:20]
-    missing_preview = "; ".join(missing_titles) if missing_titles else "Keine"
+    estimated_tasks = [task for task in tasks if task.get("duration_source") == "estimated"][:20]
+    estimated_preview = "; ".join(
+        f"{task.get('title', 'Ohne Titel')} [{task.get('category', 'Privat')}, {task.get('duration_minutes')} Min.]"
+        for task in estimated_tasks
+    )
+    if not estimated_preview:
+        estimated_preview = "Keine"
     return (
         f"Todoist Projekte read-only: {project_count} geladen.",
         f"Todoist Sections read-only: {section_count} geladen.",
         f"Todoist Labels read-only: {label_count} geladen.",
         f"Kategorie-Verteilung nach Projekt/Section/Label/Titel-Mapping: {category_summary}.",
-        f"Dauer aus nativer Todoist-Dauer: {duration_counts.get("native", 0)}.",
-        f"Dauer aus Label: {duration_counts.get("label", 0)}.",
-        f"Dauer aus Beschreibung: {duration_counts.get("description", 0)}.",
-        f"Aufgaben ohne erkannte Dauer: {missing_duration_count}.",
-        f"Erste 20 Aufgaben ohne Dauer: {missing_preview}.",
+        f"Dauer aus nativer Todoist-Dauer: {duration_counts.get('native', 0)}.",
+        f"Dauer aus Label: {duration_counts.get('label', 0)}.",
+        f"Dauer aus Beschreibung: {duration_counts.get('description', 0)}.",
+        f"Dauer automatisch geschätzt: {duration_counts.get('estimated', 0)}.",
+        f"Aufgaben ohne Dauer nach Schätzung: {missing_duration_count}.",
+        f"Erste 20 automatisch geschätzte Aufgaben: {estimated_preview}.",
     )
 
 

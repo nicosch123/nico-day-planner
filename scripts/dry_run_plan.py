@@ -149,8 +149,8 @@ def load_json(path: Path) -> Any:
 
 def normalize_task(raw: dict[str, Any]) -> Task:
     raw_duration = raw.get("duration_minutes")
-    estimated = raw_duration is None
-    duration = DEFAULT_ESTIMATED_DURATION_MINUTES if estimated else int(raw_duration)
+    estimated = raw_duration is None or raw.get("duration_source") == "estimated"
+    duration = DEFAULT_ESTIMATED_DURATION_MINUTES if raw_duration is None else int(raw_duration)
     return Task(
         id=str(raw.get("id", "unknown")),
         title=str(raw.get("title", "Ohne Titel")),
