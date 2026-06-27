@@ -1,12 +1,26 @@
-version: "0.5"
+version: "0.6-calendar"
 mode: dry_run
 locale: de-DE
 timezone: Europe/Berlin
 
 safety:
-  dry_run_only: true
-  google_calendar_access: none
+  default_mode: dry_run
+  google_calendar_access: read_only
+  google_calendar_write_requires:
+    - --write-calendar
+    - GOOGLE_CALENDAR_WRITE_ENABLED=true
+  google_calendar_replace_requires:
+    - --replace-auto-events
+    - marker:NICO_DAY_PLANNER_AUTO
+  never_modify_google_events_without_marker: NICO_DAY_PLANNER_AUTO
   todoist_access: read_only
+  todoist_forbidden_actions:
+    - modify_tasks
+    - complete_tasks
+    - move_tasks
+    - delete_tasks
+    - modify_labels
+    - write_comments
   never_write_secrets_to_repo: true
 
 planning_window:
@@ -25,8 +39,11 @@ sources:
     token_env_var: TODOIST_API_TOKEN
     fallback_source: json
   google_calendar:
-    enabled: false
-    access: none
+    enabled: true
+    read_access: read_only
+    write_access: gated
+    marker: NICO_DAY_PLANNER_AUTO
+    write_enabled_env_var: GOOGLE_CALENDAR_WRITE_ENABLED
 
 categories:
   - Werkstatt

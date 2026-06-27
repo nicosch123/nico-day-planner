@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Todoist client for Nico Day Planner v0.5.
+"""Read-only Todoist client for Nico Day Planner v0.6-calendar.
 
 This module intentionally implements only read operations. It never creates,
 updates, closes, moves, comments on, labels, or deletes Todoist tasks.

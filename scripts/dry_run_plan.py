@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local dry-run planner for Nico Day Planner v0.5.
+"""Local dry-run planner for Nico Day Planner v0.6-calendar.
 
 Default task source is JSON. Todoist can be used as a read-only source with
 --source todoist. Calendar source defaults to local JSON; Google Calendar can
@@ -558,7 +558,7 @@ def render_plan(plan: PlanResult) -> str:
     weekday = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][plan.target_day.weekday()]
     free_minutes = sum(window.minutes for window in plan.free_windows)
 
-    lines.append(f"# Nico Day Planner v0.5 – Dry-Run für {weekday}, {plan.target_day.isoformat()}")
+    lines.append(f"# Nico Day Planner v0.6-calendar – Dry-Run für {weekday}, {plan.target_day.isoformat()}")
     lines.append("")
     lines.append("## Annahmen")
     lines.append("- Standard ist Dry-Run: Kalender-Schreiben nur mit `--write-calendar` und `GOOGLE_CALENDAR_WRITE_ENABLED=true`.")
@@ -636,7 +636,7 @@ def render_plan(plan: PlanResult) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Nico Day Planner v0.5 Dry-Run")
+    parser = argparse.ArgumentParser(description="Nico Day Planner v0.6-calendar Dry-Run")
     parser.add_argument(
         "--source",
         choices=("json", "todoist"),
