@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ DEFAULT_CALENDAR_ID = "primary"
 READ_ONLY_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
 WRITE_SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
 AUTO_EVENT_MARKER = "NICO_DAY_PLANNER_AUTO"
+ABSENCE_ALL_DAY_KEYWORDS = ("urlaub", "frei", "krank", "abwesend", "reise", "block", "nico_block_day")
 
 
 @dataclass(frozen=True)
@@ -156,29 +157,71 @@ def _parse_google_datetime(value: dict[str, str], fallback_date: date, fallback_
     return datetime.combine(fallback_date, fallback_time)
 
 
-def _event_to_block(event: dict[str, Any], target_date: date) -> dict[str, Any] | None:
-    """Map one Google Calendar event to the planner's neutral block schema."""
+def _is_absence_all_day_title(title: str) -> bool:
+    """Return whether an all-day-style title should still block the day."""
+    normalized = title.lower()
+    return any(keyword in normalized for keyword in ABSENCE_ALL_DAY_KEYWORDS)
+
+
+def _is_google_all_day_event(start_raw: dict[str, str], end_raw: dict[str, str]) -> bool:
+    """Return whether Google supplied an all-day date/date event."""
+    return bool(
+        start_raw.get("date")
+        and end_raw.get("date")
+        and not start_raw.get("dateTime")
+        and not end_raw.get("dateTime")
+    )
+
+
+def _is_practical_full_day_event(start: datetime, end: datetime, target_date: date) -> bool:
+    """Detect timed events that effectively cover the whole target date."""
+    day_start = datetime.combine(target_date, time.min)
+    next_day_start = day_start + timedelta(days=1)
+    practical_day_end = datetime.combine(target_date, time(23, 59))
+    starts_at_day_start = start <= day_start
+    ends_at_day_end = end >= practical_day_end or end >= next_day_start
+    return starts_at_day_start and ends_at_day_end
+
+
+def _event_to_block(event: dict[str, Any], target_date: date) -> tuple[dict[str, Any] | None, str | None]:
+    """Map one Google Calendar event to the planner's neutral block schema.
+
+    Transparent events and all-day/reminder-style events are ignored as blockers
+    unless the all-day title clearly indicates absence or an intentional block.
+    The optional note explains why a loaded Google event was not returned as a
+    blocking planner block.
+    """
     if event.get("status") == "cancelled":
-        return None
+        return None, None
+
+    title = str(event.get("summary") or "Ohne Titel")
+    if event.get("transparency") == "transparent":
+        return None, f"Nicht blockierend wegen transparency=transparent: {title}."
 
     start_raw = event.get("start")
     end_raw = event.get("end")
     if not isinstance(start_raw, dict) or not isinstance(end_raw, dict):
-        return None
+        return None, None
 
     start = _parse_google_datetime(start_raw, target_date, time(0, 0))
     end = _parse_google_datetime(end_raw, target_date, time(23, 59))
     if end <= start:
-        return None
+        return None, None
+
+    all_day_style = _is_google_all_day_event(start_raw, end_raw) or _is_practical_full_day_event(
+        start, end, target_date
+    )
+    if all_day_style and not _is_absence_all_day_title(title):
+        return None, f"Ganztagstermin nicht als Blocker gewertet: {title}."
 
     return {
         "id": str(event.get("id", "google-calendar-unknown")),
-        "title": str(event.get("summary") or "Ohne Titel"),
+        "title": title,
         "start": start.isoformat(timespec="seconds"),
         "end": end.isoformat(timespec="seconds"),
         "location": str(event.get("location") or ""),
         "source": "Google Calendar",
-    }
+    }, None
 
 
 def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult:
@@ -212,11 +255,31 @@ def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult
     )
 
     items = response.get("items", [])
-    events = [block for item in items if isinstance(item, dict) for block in [_event_to_block(item, target_date)] if block]
+    events: list[dict[str, Any]] = []
+    non_blocking_notes: list[str] = []
+    loaded_count = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        loaded_count += 1
+        block, note = _event_to_block(item, target_date)
+        if block:
+            events.append(block)
+        if note:
+            non_blocking_notes.append(note)
+
+    status_details = [
+        f"Google Calendar ID: {calendar_id}.",
+        f"Google Calendar blockierend: {len(events)} von {loaded_count} geladenen Termin(en).",
+    ]
+    status_details.extend(non_blocking_notes[:5])
+    if len(non_blocking_notes) > 5:
+        status_details.append(f"Weitere nicht blockierende Google-Termine: {len(non_blocking_notes) - 5}.")
+
     return GoogleCalendarReadResult(
         events=events,
-        status=f"Google Calendar read-only: {len(events)} Termin(e) geladen.",
-        status_details=(f"Google Calendar ID: {calendar_id}.",),
+        status=f"Google Calendar read-only: {loaded_count} Termin(e) geladen.",
+        status_details=tuple(status_details),
     )
 
 
