@@ -1,16 +1,20 @@
-# Nico Day Planner v0.5
+# Nico Day Planner v0.6-calendar
 
-Persönlicher Tagesplaner als lokaler Dry-Run. Version 0.5 erzeugt jeden Abend einen realistischen Textvorschlag für den nächsten Tag, ohne externe Daten zu verändern.
+Persönlicher Tagesplaner mit sicherem Dry-Run-Standard. Version 0.6-calendar erzeugt jeden Abend einen realistischen Textvorschlag für den nächsten Tag, kann Todoist read-only lesen und Google Calendar read-only als Kalenderquelle verwenden.
 
 ## Status und Sicherheitsgrenzen
 
-Version 0.5 ist bewusst klein und sicher:
+Version 0.6-calendar bleibt bewusst sicher:
 
 - Standardquelle ist lokales JSON (`data/example_tasks.json`).
 - Optional können offene Todoist-Aufgaben read-only gelesen werden.
 - Wenn `TODOIST_API_TOKEN` fehlt oder Todoist nicht lesbar ist, fällt der Planer sauber auf JSON zurück.
-- Es gibt keinen Google-Kalender-Zugriff.
+- Google Calendar darf über `--calendar-source google` read-only als Kalenderquelle gelesen werden.
+- Google Calendar Write Mode ist nur erlaubt, wenn `--write-calendar` gesetzt ist und zusätzlich `GOOGLE_CALENDAR_WRITE_ENABLED=true` in der Umgebung steht.
+- Ersetzen/Löschen ist nur mit `--replace-auto-events` erlaubt und nur für Events mit Marker `NICO_DAY_PLANNER_AUTO`.
+- Manuelle Kalendertermine und Events ohne Marker `NICO_DAY_PLANNER_AUTO` dürfen nicht gelöscht oder geändert werden.
 - Es werden keine Todoist-Aufgaben verändert, abgeschlossen, verschoben oder gelöscht.
+- Es werden keine Todoist-Labels geändert und keine Todoist-Kommentare geschrieben.
 - Es werden keine Secrets ins Repository geschrieben.
 - Der Plan ist nur ein Vorschlag und muss manuell geprüft werden.
 
@@ -18,14 +22,23 @@ Version 0.5 ist bewusst klein und sicher:
 
 - `AGENTS.md`: Dauerhafte Projektregeln und Sicherheitsvorgaben.
 - `README.md`: Bedienung, Status und Tests.
-- `rules.yaml`: Konfigurierbare Planungsregeln für Version 0.5.
+- `requirements.txt`: Python-Abhängigkeiten für Todoist/Google-Calendar-Läufe.
+- `rules.yaml`: Konfigurierbare Planungsregeln für Version 0.6-calendar.
 - `planner_prompt.md`: Prompt-Vorlage für spätere LLM-Planung.
 - `data/example_tasks.json`: Lokale Beispiel-Aufgaben.
-- `data/example_calendar.json`: Lokale Beispiel-Blocker; kein Google-Kalender.
-- `scripts/dry_run_plan.py`: Lokaler Planer mit JSON-Default und optionalem Todoist-Read-only-Modus.
+- `data/example_calendar.json`: Lokale Beispiel-Blocker als JSON-Fallback.
+- `scripts/dry_run_plan.py`: Planer mit JSON-Default, optionalem Todoist-Read-only-Modus und Google-Calendar-Read-only-Quelle.
 - `scripts/todoist_client.py`: Minimaler Todoist-Client mit ausschließlich lesendem `GET /rest/v2/tasks`.
 
 ## Schnellstart
+
+Installiere zuerst die Projekt-Dependencies, insbesondere vor Google-Calendar-Tests:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Google-Credentials werden nicht ins Repository geschrieben. Setze sie ausschließlich über Environment Variables oder lokale, nicht versionierte Dateien.
 
 ```bash
 python3 scripts/dry_run_plan.py
@@ -44,9 +57,26 @@ export TODOIST_API_TOKEN="dein-lokaler-token"
 python3 scripts/dry_run_plan.py --source todoist
 ```
 
+Google-Calendar-Read-only-Lauf:
+
+```bash
+export GOOGLE_CALENDAR_CREDENTIALS_JSON='{...}'
+export GOOGLE_CALENDAR_ID="dein-kalender@example.com"
+python3 scripts/dry_run_plan.py --source todoist --calendar-source google
+```
+
+Google-Calendar-Schreiben bleibt standardmäßig blockiert und ist nur mit beiden Gates erlaubt:
+
+```bash
+export GOOGLE_CALENDAR_WRITE_ENABLED=true
+python3 scripts/dry_run_plan.py --source todoist --calendar-source google --write-calendar
+```
+
+Automatisches Ersetzen/Löschen ist zusätzlich nur mit `--replace-auto-events` erlaubt und betrifft ausschließlich Events mit Marker `NICO_DAY_PLANNER_AUTO`.
+
 Ohne `TODOIST_API_TOKEN` wird kein Fehler geworfen; der Planer meldet den fehlenden Token und nutzt lokale JSON-Beispieldaten.
 
-## Planungsregeln in Version 0.5
+## Planungsregeln in Version 0.6-calendar
 
 Der Planer berücksichtigt folgende Regeln:
 
@@ -99,14 +129,36 @@ Der Planer berücksichtigt folgende Regeln:
 }
 ```
 
-Diese Datei ist kein Google-Kalender-Export und löst keinen Google-Zugriff aus.
+Diese Datei ist der lokale JSON-Fallback. Google Calendar wird nur gelesen, wenn `--calendar-source google` explizit gesetzt wird.
 
 ## Tests
+
+Vor Tests mit `--calendar-source google` muss die Umgebung mit `python3 -m pip install -r requirements.txt` vorbereitet sein. Wenn die aktuelle Codex-Umgebung die neuen Requirements noch nicht installiert hat, ist ein neuer Codex-Task bzw. Environment-Rebuild nötig.
 
 ```bash
 python3 -m json.tool data/example_tasks.json >/dev/null
 python3 -m json.tool data/example_calendar.json >/dev/null
+python3 -m py_compile scripts/todoist_client.py
+python3 -m py_compile scripts/google_calendar_client.py
 python3 -m py_compile scripts/dry_run_plan.py
 python3 scripts/dry_run_plan.py --source json
 python3 scripts/dry_run_plan.py --source todoist
+python3 scripts/dry_run_plan.py --source todoist --calendar-source google
 ```
+
+Google-Calendar-Read-only-Lauf:
+
+```bash
+export GOOGLE_CALENDAR_CREDENTIALS_JSON='{...}'
+export GOOGLE_CALENDAR_ID="dein-kalender@example.com"
+python3 scripts/dry_run_plan.py --source todoist --calendar-source google
+```
+
+Google-Calendar-Schreiben bleibt standardmäßig blockiert und ist nur mit beiden Gates erlaubt:
+
+```bash
+export GOOGLE_CALENDAR_WRITE_ENABLED=true
+python3 scripts/dry_run_plan.py --source todoist --calendar-source google --write-calendar
+```
+
+Automatisches Ersetzen/Löschen ist zusätzlich nur mit `--replace-auto-events` erlaubt und betrifft ausschließlich Events mit Marker `NICO_DAY_PLANNER_AUTO`.
