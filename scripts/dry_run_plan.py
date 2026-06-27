@@ -514,6 +514,13 @@ def apply_calendar_write(plan: PlanResult, write_calendar: bool, replace_auto_ev
     if not write_calendar:
         return
 
+    if plan.calendar_source != "google":
+        plan.calendar_write_blocked_warning = (
+            "Schreiben blockiert: --write-calendar ist nur mit --calendar-source google erlaubt."
+        )
+        plan.warnings.append(plan.calendar_write_blocked_warning)
+        return
+
     if os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED") != "true":
         plan.calendar_write_blocked_warning = (
             "Schreiben blockiert: GOOGLE_CALENDAR_WRITE_ENABLED=true ist nicht gesetzt."
