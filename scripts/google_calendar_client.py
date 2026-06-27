@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from pathlib import Path
@@ -66,36 +69,74 @@ def _load_credentials_payload(raw_value: str) -> dict[str, Any]:
     return payload
 
 
-def _build_calendar_service(credentials_payload: dict[str, Any], scopes: tuple[str, ...]) -> Any:
-    """Build a Google Calendar API service with the requested scope tuple."""
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        from googleapiclient.errors import HttpError
-    except ImportError as exc:
-        raise GoogleCalendarReadError(
-            "Google Calendar Python-Abhängigkeiten fehlen "
-            "(google-api-python-client und google-auth)."
-        ) from exc
+def _access_token(credentials_payload: dict[str, Any], scopes: tuple[str, ...]) -> str:
+    """Create and refresh a service-account access token for Google Calendar REST calls."""
+    from google.auth.transport.requests import Request
+    from google.oauth2 import service_account
 
     try:
         credentials = service_account.Credentials.from_service_account_info(
             credentials_payload,
             scopes=scopes,
         )
-        return build("calendar", "v3", credentials=credentials, cache_discovery=False), HttpError
+        credentials.refresh(Request())
     except Exception as exc:  # noqa: BLE001 - surfaced as user-facing Google Calendar error.
-        raise GoogleCalendarReadError("Google Calendar Service konnte nicht erstellt werden.") from exc
+        raise GoogleCalendarReadError("Google Calendar OAuth-Token konnte nicht erstellt werden.") from exc
+
+    if not credentials.token:
+        raise GoogleCalendarReadError("Google Calendar OAuth-Token ist leer.")
+    return str(credentials.token)
 
 
-def _build_read_only_service(credentials_payload: dict[str, Any]) -> Any:
-    """Build a Google Calendar API service with read-only scope only."""
-    return _build_calendar_service(credentials_payload, READ_ONLY_SCOPES)
+def _calendar_events_url(calendar_id: str, event_id: str | None = None, query: dict[str, str] | None = None) -> str:
+    """Build a Google Calendar REST events URL with URL-encoded calendar and event ids."""
+    encoded_calendar_id = urllib.parse.quote(calendar_id, safe="")
+    url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar_id}/events"
+    if event_id is not None:
+        url = f"{url}/{urllib.parse.quote(event_id, safe='')}"
+    if query:
+        url = f"{url}?{urllib.parse.urlencode(query)}"
+    return url
 
 
-def _build_write_service(credentials_payload: dict[str, Any]) -> Any:
-    """Build a Google Calendar API service with event write scope."""
-    return _build_calendar_service(credentials_payload, WRITE_SCOPES)
+def _google_calendar_rest_request(
+    credentials_payload: dict[str, Any],
+    scopes: tuple[str, ...],
+    method: str,
+    url: str,
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute one authorized Google Calendar REST request via urllib."""
+    token = _access_token(credentials_payload, scopes)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read()
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise GoogleCalendarReadError(
+            f"Google Calendar REST request failed: HTTP {exc.code} {exc.reason}: {error_body}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise GoogleCalendarReadError(f"Google Calendar REST request failed: {exc.reason}.") from exc
+
+    if not response_body:
+        return {}
+    try:
+        decoded = json.loads(response_body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise GoogleCalendarReadError("Google Calendar REST response enthielt ungültiges JSON.") from exc
+    if not isinstance(decoded, dict):
+        raise GoogleCalendarReadError("Google Calendar REST response war kein JSON-Objekt.")
+    return decoded
 
 
 def _parse_google_datetime(value: dict[str, str], fallback_date: date, fallback_time: time) -> datetime:
@@ -151,30 +192,26 @@ def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult
         )
 
     credentials_payload = _load_credentials_payload(raw_credentials)
-    service, http_error_type = _build_read_only_service(credentials_payload)
     calendar_id = os.environ.get(CALENDAR_ID_ENV_VAR, DEFAULT_CALENDAR_ID)
     day_start = datetime.combine(target_date, time.min).replace(tzinfo=timezone.utc)
     day_end = datetime.combine(target_date, time.max).replace(tzinfo=timezone.utc)
+    response = _google_calendar_rest_request(
+        credentials_payload,
+        READ_ONLY_SCOPES,
+        "GET",
+        _calendar_events_url(
+            calendar_id,
+            query={
+                "timeMin": day_start.isoformat().replace("+00:00", "Z"),
+                "timeMax": day_end.isoformat().replace("+00:00", "Z"),
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "showDeleted": "false",
+            },
+        ),
+    )
 
-    try:
-        response = (
-            service.events()
-            .list(
-                calendarId=calendar_id,
-                timeMin=day_start.isoformat().replace("+00:00", "Z"),
-                timeMax=day_end.isoformat().replace("+00:00", "Z"),
-                singleEvents=True,
-                orderBy="startTime",
-                showDeleted=False,
-            )
-            .execute()
-        )
-    except http_error_type as exc:
-        raise GoogleCalendarReadError(f"Google Calendar read-only request failed: {exc}.") from exc
-    except Exception as exc:  # noqa: BLE001 - surfaced as user-facing read error.
-        raise GoogleCalendarReadError("Google Calendar read-only request failed.") from exc
-
-    items = response.get("items", []) if isinstance(response, dict) else []
+    items = response.get("items", [])
     events = [block for item in items if isinstance(item, dict) for block in [_event_to_block(item, target_date)] if block]
     return GoogleCalendarReadResult(
         events=events,
@@ -206,37 +243,39 @@ def delete_auto_events_for_date(target_date: date, calendar_id: str) -> int:
         raise GoogleCalendarReadError(f"{CREDENTIALS_ENV_VAR} fehlt – Google Calendar Schreiben nicht möglich.")
 
     credentials_payload = _load_credentials_payload(raw_credentials)
-    service, http_error_type = _build_write_service(credentials_payload)
     time_min, time_max = _day_bounds_utc(target_date)
 
-    try:
-        response = (
-            service.events()
-            .list(
-                calendarId=calendar_id,
-                timeMin=time_min,
-                timeMax=time_max,
-                singleEvents=True,
-                orderBy="startTime",
-                showDeleted=False,
-            )
-            .execute()
+    response = _google_calendar_rest_request(
+        credentials_payload,
+        WRITE_SCOPES,
+        "GET",
+        _calendar_events_url(
+            calendar_id,
+            query={
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "showDeleted": "false",
+            },
+        ),
+    )
+    items = response.get("items", [])
+    deleted_count = 0
+    for event in items:
+        if not isinstance(event, dict) or not _contains_auto_marker(event):
+            continue
+        event_id = event.get("id")
+        if not event_id:
+            continue
+        _google_calendar_rest_request(
+            credentials_payload,
+            WRITE_SCOPES,
+            "DELETE",
+            _calendar_events_url(calendar_id, event_id=str(event_id)),
         )
-        items = response.get("items", []) if isinstance(response, dict) else []
-        deleted_count = 0
-        for event in items:
-            if not isinstance(event, dict) or not _contains_auto_marker(event):
-                continue
-            event_id = event.get("id")
-            if not event_id:
-                continue
-            service.events().delete(calendarId=calendar_id, eventId=str(event_id)).execute()
-            deleted_count += 1
-        return deleted_count
-    except http_error_type as exc:
-        raise GoogleCalendarReadError(f"Google Calendar write request failed: {exc}.") from exc
-    except Exception as exc:  # noqa: BLE001 - surfaced as user-facing write error.
-        raise GoogleCalendarReadError("Google Calendar write request failed.") from exc
+        deleted_count += 1
+    return deleted_count
 
 
 def create_calendar_event(calendar_id: str, event_body: dict[str, Any]) -> str:
@@ -246,11 +285,11 @@ def create_calendar_event(calendar_id: str, event_body: dict[str, Any]) -> str:
         raise GoogleCalendarReadError(f"{CREDENTIALS_ENV_VAR} fehlt – Google Calendar Schreiben nicht möglich.")
 
     credentials_payload = _load_credentials_payload(raw_credentials)
-    service, http_error_type = _build_write_service(credentials_payload)
-    try:
-        response = service.events().insert(calendarId=calendar_id, body=event_body).execute()
-    except http_error_type as exc:
-        raise GoogleCalendarReadError(f"Google Calendar write request failed: {exc}.") from exc
-    except Exception as exc:  # noqa: BLE001 - surfaced as user-facing write error.
-        raise GoogleCalendarReadError("Google Calendar write request failed.") from exc
-    return str(response.get("id", "")) if isinstance(response, dict) else ""
+    response = _google_calendar_rest_request(
+        credentials_payload,
+        WRITE_SCOPES,
+        "POST",
+        _calendar_events_url(calendar_id),
+        body=event_body,
+    )
+    return str(response.get("id", ""))
