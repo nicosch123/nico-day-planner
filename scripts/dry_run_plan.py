@@ -11,12 +11,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from google_calendar_client import GoogleCalendarReadError, load_calendar_events_for_date
+from google_calendar_client import (
+    AUTO_EVENT_MARKER,
+    CALENDAR_ID_ENV_VAR,
+    DEFAULT_CALENDAR_ID,
+    GoogleCalendarReadError,
+    create_calendar_event,
+    delete_auto_events_for_date,
+    load_calendar_events_for_date,
+)
 from todoist_client import TodoistReadError, load_todoist_tasks_from_env
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +81,7 @@ class Task:
     priority: str
     duration_minutes: int
     estimated: bool = False
+    duration_source: str = "estimated"
     notes: str = ""
 
 
@@ -134,6 +144,11 @@ class PlanResult:
     warnings: list[str] = field(default_factory=list)
     source_details: tuple[str, ...] = field(default_factory=tuple)
     calendar_details: tuple[str, ...] = field(default_factory=tuple)
+    calendar_write_enabled: bool = False
+    calendar_write_blocked_warning: str = ""
+    calendar_write_target_id: str = DEFAULT_CALENDAR_ID
+    calendar_created_events: int = 0
+    calendar_deleted_events: int = 0
 
 
 def parse_hhmm(value: str) -> time:
@@ -157,6 +172,7 @@ def normalize_task(raw: dict[str, Any]) -> Task:
     raw_duration = raw.get("duration_minutes")
     estimated = raw_duration is None or raw.get("duration_source") == "estimated"
     duration = DEFAULT_ESTIMATED_DURATION_MINUTES if raw_duration is None else int(raw_duration)
+    duration_source = str(raw.get("duration_source", "estimated" if estimated else "explicit"))
     return Task(
         id=str(raw.get("id", "unknown")),
         title=str(raw.get("title", "Ohne Titel")),
@@ -164,6 +180,7 @@ def normalize_task(raw: dict[str, Any]) -> Task:
         priority=str(raw.get("priority", "P4")),
         duration_minutes=duration,
         estimated=estimated,
+        duration_source=duration_source,
         notes=str(raw.get("notes", "")),
     )
 
@@ -462,6 +479,62 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
     )
 
 
+def _calendar_event_description(block: PlannedBlock) -> str:
+    task = block.task
+    return "\n".join(
+        [
+            AUTO_EVENT_MARKER,
+            "automatisch erstellt vom Nico Day Planner",
+            f"Todoist Task ID: {task.id}",
+            f"Kategorie: {task.category}",
+            f"Priorität: {task.priority}",
+            f"Dauer: {task.duration_minutes} Minuten",
+            f"duration_source: {task.duration_source}",
+        ]
+    )
+
+
+def _calendar_event_body(block: PlannedBlock) -> dict[str, Any]:
+    task = block.task
+    return {
+        "summary": f"[{task.category}] {task.title}",
+        "description": _calendar_event_description(block),
+        "start": {"dateTime": block.start.isoformat()},
+        "end": {"dateTime": block.end.isoformat()},
+    }
+
+
+def apply_calendar_write(plan: PlanResult, write_calendar: bool, replace_auto_events: bool) -> None:
+    target_calendar_id = os.environ.get(CALENDAR_ID_ENV_VAR, DEFAULT_CALENDAR_ID)
+    plan.calendar_write_target_id = target_calendar_id
+    plan.calendar_write_enabled = False
+    plan.calendar_created_events = 0
+    plan.calendar_deleted_events = 0
+
+    if not write_calendar:
+        return
+
+    if os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED") != "true":
+        plan.calendar_write_blocked_warning = (
+            "Schreiben blockiert: GOOGLE_CALENDAR_WRITE_ENABLED=true ist nicht gesetzt."
+        )
+        plan.warnings.append(plan.calendar_write_blocked_warning)
+        return
+
+    plan.calendar_write_enabled = True
+    try:
+        if replace_auto_events:
+            plan.calendar_deleted_events = delete_auto_events_for_date(plan.target_day, target_calendar_id)
+        for block in plan.planned_blocks:
+            create_calendar_event(target_calendar_id, _calendar_event_body(block))
+            plan.calendar_created_events += 1
+    except GoogleCalendarReadError as exc:
+        plan.calendar_write_enabled = False
+        warning = f"Google Calendar Schreiben fehlgeschlagen ({exc}) – keine weiteren Events geschrieben."
+        plan.calendar_write_blocked_warning = warning
+        plan.warnings.append(warning)
+
+
 def render_task(task: Task) -> str:
     estimated = " (Dauer geschätzt)" if task.estimated else ""
     return f"{task.title} [{task.category}, {task.priority}, {task.duration_minutes} Min.]{estimated}"
@@ -481,7 +554,7 @@ def render_plan(plan: PlanResult) -> str:
     lines.append(f"# Nico Day Planner v0.5 – Dry-Run für {weekday}, {plan.target_day.isoformat()}")
     lines.append("")
     lines.append("## Annahmen")
-    lines.append("- Version 0.5 ist ein lokaler Dry-Run: keine Kalender- oder Todoist-Schreibzugriffe.")
+    lines.append("- Standard ist Dry-Run: Kalender-Schreiben nur mit `--write-calendar` und `GOOGLE_CALENDAR_WRITE_ENABLED=true`.")
     lines.append("- Geplant wird nur zwischen 09:00 und 23:00 Uhr.")
     lines.append(f"- Freie Zeit: {free_minutes} Minuten; davon maximal 70 Prozent verplant: {plan.capacity_minutes} Minuten.")
     lines.append("- Maximal 6 Hauptaufgaben und 2 Mini-Tasks werden automatisch eingeplant.")
@@ -498,8 +571,18 @@ def render_plan(plan: PlanResult) -> str:
     if plan.calendar_fallback_used:
         lines.append("- Kalender-Fallback aktiv: JSON-Kalenderdaten wurden verwendet.")
     lines.extend(render_source_details(plan.calendar_details))
+    lines.append("")
+    lines.append("## Kalender-Schreibstatus")
+    lines.append(f"- Kalender-Schreiben: {'aktiviert' if plan.calendar_write_enabled else 'deaktiviert'}.")
+    lines.append(f"- Zielkalender-ID: `{plan.calendar_write_target_id}`.")
+    lines.append(f"- Schreibschutz aktiv: nur Events mit Marker `{AUTO_EVENT_MARKER}` werden ersetzt/gelöscht.")
+    lines.append(f"- Anzahl erstellter Events: {plan.calendar_created_events}.")
+    lines.append(f"- Anzahl gelöschter alter Auto-Events: {plan.calendar_deleted_events}.")
+    if plan.calendar_write_blocked_warning:
+        lines.append(f"- Warnung: {plan.calendar_write_blocked_warning}")
     for warning in plan.warnings:
-        lines.append(f"- Warnung: {warning}")
+        if warning != plan.calendar_write_blocked_warning:
+            lines.append(f"- Warnung: {warning}")
     lines.append("")
 
     lines.append("## Blockierte Zeiten")
@@ -563,6 +646,16 @@ def parse_args() -> argparse.Namespace:
         "--date",
         help="Optionales Zieldatum im Format YYYY-MM-DD. Default: morgen.",
     )
+    parser.add_argument(
+        "--write-calendar",
+        action="store_true",
+        help="Google Calendar Events schreiben, nur wenn zusätzlich GOOGLE_CALENDAR_WRITE_ENABLED=true gesetzt ist.",
+    )
+    parser.add_argument(
+        "--replace-auto-events",
+        action="store_true",
+        help=f"Alte Planner-Events am Zieltag ersetzen; löscht nur Events mit Marker {AUTO_EVENT_MARKER}.",
+    )
     return parser.parse_args()
 
 
@@ -570,6 +663,7 @@ def main() -> None:
     args = parse_args()
     target_day = date.fromisoformat(args.date) if args.date else date.today() + timedelta(days=1)
     plan = build_plan(args.source, target_day, args.calendar_source)
+    apply_calendar_write(plan, args.write_calendar, args.replace_auto_events)
     print(render_plan(plan))
 
 

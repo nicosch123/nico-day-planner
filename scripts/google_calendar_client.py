@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Read-only Google Calendar client for Nico Day Planner.
+"""Google Calendar client for Nico Day Planner.
 
-This module only reads events from Google Calendar. It never creates, updates,
-deletes, moves, or otherwise mutates calendar data.
+Reads events by default. Calendar writes are guarded by the CLI and environment
+safety checks in ``dry_run_plan.py`` and only operate on planner-owned events.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ CREDENTIALS_ENV_VAR = "GOOGLE_CALENDAR_CREDENTIALS_JSON"
 CALENDAR_ID_ENV_VAR = "GOOGLE_CALENDAR_ID"
 DEFAULT_CALENDAR_ID = "primary"
 READ_ONLY_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
+WRITE_SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
+AUTO_EVENT_MARKER = "NICO_DAY_PLANNER_AUTO"
 
 
 @dataclass(frozen=True)
@@ -64,8 +66,8 @@ def _load_credentials_payload(raw_value: str) -> dict[str, Any]:
     return payload
 
 
-def _build_read_only_service(credentials_payload: dict[str, Any]) -> Any:
-    """Build a Google Calendar API service with read-only scope only."""
+def _build_calendar_service(credentials_payload: dict[str, Any], scopes: tuple[str, ...]) -> Any:
+    """Build a Google Calendar API service with the requested scope tuple."""
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -79,11 +81,21 @@ def _build_read_only_service(credentials_payload: dict[str, Any]) -> Any:
     try:
         credentials = service_account.Credentials.from_service_account_info(
             credentials_payload,
-            scopes=READ_ONLY_SCOPES,
+            scopes=scopes,
         )
         return build("calendar", "v3", credentials=credentials, cache_discovery=False), HttpError
-    except Exception as exc:  # noqa: BLE001 - surfaced as user-facing read error.
-        raise GoogleCalendarReadError("Google Calendar read-only Service konnte nicht erstellt werden.") from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced as user-facing Google Calendar error.
+        raise GoogleCalendarReadError("Google Calendar Service konnte nicht erstellt werden.") from exc
+
+
+def _build_read_only_service(credentials_payload: dict[str, Any]) -> Any:
+    """Build a Google Calendar API service with read-only scope only."""
+    return _build_calendar_service(credentials_payload, READ_ONLY_SCOPES)
+
+
+def _build_write_service(credentials_payload: dict[str, Any]) -> Any:
+    """Build a Google Calendar API service with event write scope."""
+    return _build_calendar_service(credentials_payload, WRITE_SCOPES)
 
 
 def _parse_google_datetime(value: dict[str, str], fallback_date: date, fallback_time: time) -> datetime:
@@ -169,3 +181,76 @@ def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult
         status=f"Google Calendar read-only: {len(events)} Termin(e) geladen.",
         status_details=(f"Google Calendar ID: {calendar_id}.",),
     )
+
+
+def _day_bounds_utc(target_date: date) -> tuple[str, str]:
+    day_start = datetime.combine(target_date, time.min).replace(tzinfo=timezone.utc)
+    day_end = datetime.combine(target_date, time.max).replace(tzinfo=timezone.utc)
+    return day_start.isoformat().replace("+00:00", "Z"), day_end.isoformat().replace("+00:00", "Z")
+
+
+def _contains_auto_marker(event: dict[str, Any]) -> bool:
+    description = event.get("description")
+    return isinstance(description, str) and AUTO_EVENT_MARKER in description
+
+
+def delete_auto_events_for_date(target_date: date, calendar_id: str) -> int:
+    """Delete only planner-owned events for the target date.
+
+    The ownership check is intentionally narrow: an event is planner-owned only
+    if its description contains ``NICO_DAY_PLANNER_AUTO``. Events without that
+    marker are never deleted or changed by this function.
+    """
+    raw_credentials = os.environ.get(CREDENTIALS_ENV_VAR)
+    if not raw_credentials:
+        raise GoogleCalendarReadError(f"{CREDENTIALS_ENV_VAR} fehlt – Google Calendar Schreiben nicht möglich.")
+
+    credentials_payload = _load_credentials_payload(raw_credentials)
+    service, http_error_type = _build_write_service(credentials_payload)
+    time_min, time_max = _day_bounds_utc(target_date)
+
+    try:
+        response = (
+            service.events()
+            .list(
+                calendarId=calendar_id,
+                timeMin=time_min,
+                timeMax=time_max,
+                singleEvents=True,
+                orderBy="startTime",
+                showDeleted=False,
+            )
+            .execute()
+        )
+        items = response.get("items", []) if isinstance(response, dict) else []
+        deleted_count = 0
+        for event in items:
+            if not isinstance(event, dict) or not _contains_auto_marker(event):
+                continue
+            event_id = event.get("id")
+            if not event_id:
+                continue
+            service.events().delete(calendarId=calendar_id, eventId=str(event_id)).execute()
+            deleted_count += 1
+        return deleted_count
+    except http_error_type as exc:
+        raise GoogleCalendarReadError(f"Google Calendar write request failed: {exc}.") from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced as user-facing write error.
+        raise GoogleCalendarReadError("Google Calendar write request failed.") from exc
+
+
+def create_calendar_event(calendar_id: str, event_body: dict[str, Any]) -> str:
+    """Create one Google Calendar event and return its API id."""
+    raw_credentials = os.environ.get(CREDENTIALS_ENV_VAR)
+    if not raw_credentials:
+        raise GoogleCalendarReadError(f"{CREDENTIALS_ENV_VAR} fehlt – Google Calendar Schreiben nicht möglich.")
+
+    credentials_payload = _load_credentials_payload(raw_credentials)
+    service, http_error_type = _build_write_service(credentials_payload)
+    try:
+        response = service.events().insert(calendarId=calendar_id, body=event_body).execute()
+    except http_error_type as exc:
+        raise GoogleCalendarReadError(f"Google Calendar write request failed: {exc}.") from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced as user-facing write error.
+        raise GoogleCalendarReadError("Google Calendar write request failed.") from exc
+    return str(response.get("id", "")) if isinstance(response, dict) else ""
