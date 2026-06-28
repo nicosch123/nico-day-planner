@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def print_header(args: argparse.Namespace, target_day: date) -> None:
     print("Nico Day Planner – Anwendungsschicht Phase 1")
-    print("============================================")
+    print("--------------------------------------------")
     print(f"Command: {args.command}")
     print(f"Zieltag: {args.day} ({target_day.isoformat()})")
     print(f"Modus: {args.mode}")
