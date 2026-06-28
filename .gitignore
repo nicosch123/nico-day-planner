@@ -4,3 +4,7 @@ scripts/__pycache__/
 google-calendar-token.json
 token.json
 credentials.json
+
+# Local Planner feedback data
+data/planner_feedback.jsonl
+data/*.jsonl
