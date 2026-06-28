@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google_calendar_client import (
     AUTO_EVENT_MARKER,
@@ -43,6 +44,7 @@ MAX_MAIN_TASKS = 6
 MAX_MINI_TASKS = 2
 MINI_TASK_MAX_MINUTES = 15
 BUCHHALTUNG_LATEST_END = time(21, 0)
+DEFAULT_CALENDAR_TIME_ZONE = "Europe/Berlin"
 WERKSTATT_DIAGNOSIS_LATEST_END = time(18, 0)
 PRIORITY_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
 
@@ -494,13 +496,25 @@ def _calendar_event_description(block: PlannedBlock) -> str:
     )
 
 
+def _calendar_event_datetime(value: datetime) -> dict[str, str]:
+    local_time_zone = ZoneInfo(DEFAULT_CALENDAR_TIME_ZONE)
+    if value.tzinfo is None:
+        local_value = value.replace(tzinfo=local_time_zone)
+    else:
+        local_value = value.astimezone(local_time_zone)
+    return {
+        "dateTime": local_value.isoformat(timespec="seconds"),
+        "timeZone": DEFAULT_CALENDAR_TIME_ZONE,
+    }
+
+
 def _calendar_event_body(block: PlannedBlock) -> dict[str, Any]:
     task = block.task
     return {
         "summary": f"[{task.category}] {task.title}",
         "description": _calendar_event_description(block),
-        "start": {"dateTime": block.start.isoformat()},
-        "end": {"dateTime": block.end.isoformat()},
+        "start": _calendar_event_datetime(block.start),
+        "end": _calendar_event_datetime(block.end),
     }
 
 
