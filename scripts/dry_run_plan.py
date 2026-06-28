@@ -154,6 +154,7 @@ class Block:
     categories: tuple[str, ...] = ()
     location: str = ""
     soft: bool = False
+    description: str = ""
 
     @property
     def minutes(self) -> int:
@@ -287,6 +288,7 @@ def normalize_calendar_event(raw: dict[str, Any]) -> Block:
         end=datetime.fromisoformat(str(raw["end"])),
         source=str(raw.get("source", "Google Calendar")),
         location=str(raw.get("location", "")),
+        description=str(raw.get("description", "")),
     )
 
 
