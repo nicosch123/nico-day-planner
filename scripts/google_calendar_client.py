@@ -28,12 +28,18 @@ ABSENCE_ALL_DAY_KEYWORDS = ("urlaub", "frei", "krank", "abwesend", "reise", "blo
 
 @dataclass(frozen=True)
 class GoogleCalendarReadResult:
-    """Result of a read-only Google Calendar fetch."""
+    """Result of a read-only Google Calendar fetch.
+
+    ``events`` contains only hard blocking Google Calendar events. Existing
+    planner-owned events are reported separately so they can be replaced without
+    reducing the free planning windows.
+    """
 
     events: list[dict[str, Any]]
     status: str
     used_fallback: bool = False
     status_details: tuple[str, ...] = field(default_factory=tuple)
+    auto_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 class GoogleCalendarReadError(RuntimeError):
@@ -186,15 +192,17 @@ def _is_practical_full_day_event(start: datetime, end: datetime, target_date: da
 def _event_to_block(event: dict[str, Any], target_date: date) -> tuple[dict[str, Any] | None, str | None]:
     """Map one Google Calendar event to the planner's neutral block schema.
 
-    Transparent events and all-day/reminder-style events are ignored as blockers
-    unless the all-day title clearly indicates absence or an intentional block.
-    The optional note explains why a loaded Google event was not returned as a
-    blocking planner block.
+    Transparent events, existing planner-owned auto events, and all-day/reminder-
+    style events are ignored as blockers unless the all-day title clearly
+    indicates absence or an intentional block. The optional note explains why a
+    loaded Google event was not returned as a blocking planner block.
     """
     if event.get("status") == "cancelled":
         return None, None
 
     title = str(event.get("summary") or "Ohne Titel")
+    if _contains_auto_marker(event):
+        return None, f"Bestehendes Planner-Auto-Event nicht als Blocker gewertet: {title}."
     if event.get("transparency") == "transparent":
         return None, f"Nicht blockierend wegen transparency=transparent: {title}."
 
@@ -223,6 +231,26 @@ def _event_to_block(event: dict[str, Any], target_date: date) -> tuple[dict[str,
         "source": "Google Calendar",
     }, None
 
+
+
+def _event_summary(event: dict[str, Any], target_date: date) -> dict[str, Any]:
+    """Return a minimal neutral summary for reporting existing planner-owned events."""
+    title = str(event.get("summary") or "Ohne Titel")
+    start_raw = event.get("start")
+    end_raw = event.get("end")
+    if isinstance(start_raw, dict) and isinstance(end_raw, dict):
+        start = _parse_google_datetime(start_raw, target_date, time(0, 0)).isoformat(timespec="seconds")
+        end = _parse_google_datetime(end_raw, target_date, time(23, 59)).isoformat(timespec="seconds")
+    else:
+        start = ""
+        end = ""
+    return {
+        "id": str(event.get("id", "google-calendar-unknown")),
+        "title": title,
+        "start": start,
+        "end": end,
+        "source": "Google Calendar",
+    }
 
 def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult:
     """Load Google Calendar events for one day using read-only API access."""
@@ -256,12 +284,15 @@ def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult
 
     items = response.get("items", [])
     events: list[dict[str, Any]] = []
+    auto_events: list[dict[str, Any]] = []
     non_blocking_notes: list[str] = []
     loaded_count = 0
     for item in items:
         if not isinstance(item, dict):
             continue
         loaded_count += 1
+        if _contains_auto_marker(item):
+            auto_events.append(_event_summary(item, target_date))
         block, note = _event_to_block(item, target_date)
         if block:
             events.append(block)
@@ -271,6 +302,7 @@ def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult
     status_details = [
         f"Google Calendar ID: {calendar_id}.",
         f"Google Calendar blockierend: {len(events)} von {loaded_count} geladenen Termin(en).",
+        f"Bestehende Planner-Auto-Events gefunden: {len(auto_events)}; diese blockieren die Neuplanung nicht.",
     ]
     status_details.extend(non_blocking_notes[:5])
     if len(non_blocking_notes) > 5:
@@ -280,6 +312,7 @@ def load_calendar_events_for_date(target_date: date) -> GoogleCalendarReadResult
         events=events,
         status=f"Google Calendar read-only: {loaded_count} Termin(e) geladen.",
         status_details=tuple(status_details),
+        auto_events=auto_events,
     )
 
 
