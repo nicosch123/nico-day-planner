@@ -12,6 +12,7 @@ from dry_run_plan import (  # noqa: E402
     Block,
     PlanResult,
     PlannedBlock,
+    RejectedTask,
     Task,
     TimeWindow,
     apply_calendar_write,
@@ -358,6 +359,90 @@ class PlannerValidationRegressionTest(unittest.TestCase):
 
         partials = [block for block in plan.planned_blocks if "Teilblock:" in block.task.notes]
         self.assertLessEqual(len(partials), 2)
+
+    def test_render_plan_card_limits_warnings_and_open_high_priority_tasks(self) -> None:
+        planned = PlannedBlock(
+            Task("planned", "Kurzaufgabe", "Privat", "P1", 15),
+            datetime(2026, 6, 29, 9, 0),
+            datetime(2026, 6, 29, 9, 15),
+        )
+        open_tasks = [
+            RejectedTask(Task(f"open-{index}", f"Offen {index}", "Studio", "P1", 30), "Testgrund")
+            for index in range(6)
+        ]
+        plan = PlanResult(
+            target_day=date(2026, 6, 29),
+            source_status="test",
+            fixed_blocks=[],
+            free_windows=[],
+            planned_blocks=[planned],
+            not_scheduled=open_tasks,
+            split_suggestions=[],
+            capacity_minutes=60,
+            planned_minutes=15,
+            source="json",
+            calendar_source="json",
+            calendar_status="test",
+            warnings=[f"Warnung {index}" for index in range(6)],
+        )
+        rendered = dry_run_plan.render_plan(plan)
+
+        self.assertTrue(rendered.startswith("# Plan Card"))
+        self.assertIn("- Status: PRÜFEN", rendered)
+        self.assertEqual(rendered.count("  - Warnung "), 5)
+        self.assertEqual(rendered.count("  - Offen "), 5)
+
+    def test_render_plan_separates_workshop_availability_from_hard_blockers(self) -> None:
+        target_day = date(2026, 6, 29)
+        weekly = Block(
+            "weekly-workshop",
+            "Werkstatt Mengen",
+            datetime(2026, 6, 29, 9, 0),
+            datetime(2026, 6, 29, 17, 0),
+            "Wochenstruktur",
+            categories=("Werkstatt",),
+            location="Mengen",
+        )
+        manual = Block(
+            "manual",
+            "Noah Striegel",
+            datetime(2026, 6, 29, 14, 0),
+            datetime(2026, 6, 29, 14, 30),
+            "Google Calendar",
+        )
+        auto_event = Block(
+            "auto",
+            "[Studio] Bestehender Auto-Plan",
+            datetime(2026, 6, 29, 15, 0),
+            datetime(2026, 6, 29, 15, 30),
+            "Google Calendar",
+        )
+        plan = PlanResult(
+            target_day=target_day,
+            source_status="test",
+            fixed_blocks=[weekly, manual],
+            free_windows=[TimeWindow(datetime(2026, 6, 29, 15, 0), datetime(2026, 6, 29, 15, 30))],
+            planned_blocks=[],
+            not_scheduled=[],
+            split_suggestions=[],
+            capacity_minutes=30,
+            planned_minutes=0,
+            source="json",
+            calendar_source="google",
+            calendar_status="test",
+            existing_auto_events=[auto_event],
+        )
+        rendered = dry_run_plan.render_plan(plan)
+        hard_section = rendered.split("### Harte Blocker", 1)[1].split("### Verfügbarkeit / Wochenstruktur", 1)[0]
+        availability_section = rendered.split("### Verfügbarkeit / Wochenstruktur", 1)[1].split(
+            "### Bestehende Planner-Auto-Events", 1
+        )[0]
+        auto_section = rendered.split("### Bestehende Planner-Auto-Events", 1)[1].split("### Unterrichtslücken / kleine Lücken", 1)[0]
+
+        self.assertIn("Noah Striegel", hard_section)
+        self.assertNotIn("Werkstatt Mengen", hard_section)
+        self.assertIn("Werkstatt Mengen", availability_section)
+        self.assertIn("Bestehender Auto-Plan", auto_section)
 
 
 if __name__ == "__main__":
