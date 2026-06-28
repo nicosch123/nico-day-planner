@@ -73,6 +73,7 @@ WERKSTATT_SMALL_KEYWORDS = (
     "notizen",
     "gerät öffnen",
 )
+PARTIAL_NEGATIVE_KEYWORDS = ("final", "abgeben", "rechnung schreiben")
 BUCHHALTUNG_LATEST_END = time(21, 0)
 DEFAULT_CALENDAR_TIME_ZONE = "Europe/Berlin"
 WERKSTATT_DIAGNOSIS_LATEST_END = time(18, 0)
@@ -524,24 +525,41 @@ def is_preferred_small_werkstatt_task(task: Task) -> bool:
     return task.category == "Werkstatt" and any(keyword in title for keyword in WERKSTATT_SMALL_KEYWORDS)
 
 
+def task_label_tokens(task: Task) -> set[str]:
+    return {token.strip().lower() for token in task.notes.replace(",", " ").split() if token.strip().startswith("@")}
+
+
 def is_safely_partial_werkstatt_task(task: Task) -> bool:
     """Return whether a Werkstatt task is safe to create as a same-day Teilblock."""
     if task.category != "Werkstatt":
         return False
+    labels = task_label_tokens(task)
+    if "@nicht_teilbar" in labels:
+        return False
+    if "@teilbar" in labels:
+        return True
     title = task.title.lower()
+    if any(keyword in title for keyword in PARTIAL_NEGATIVE_KEYWORDS):
+        return False
+    if "fertigziehen" in title:
+        return task.priority == "P1"
     return task.priority in {"P1", "P2"} or any(keyword in title for keyword in WERKSTATT_SMALL_KEYWORDS)
 
 
-def make_werkstatt_partial_task(task: Task, minutes: int) -> Task:
+def make_werkstatt_partial_task(task: Task, minutes: int, part_number: int = 1) -> Task:
+    continuation_note = f"Fortsetzung von Teilblock: {task.title}." if part_number > 1 else ""
+    notes = (task.notes + "\n" if task.notes else "") + f"Teilblock: ursprünglich {task.duration_minutes} Minuten."
+    if continuation_note:
+        notes += f"\n{continuation_note}"
     return Task(
         id=task.id,
-        title=f"{task.title} – Teil 1",
+        title=f"{task.title} – Teil {part_number}",
         category=task.category,
         priority=task.priority,
         duration_minutes=minutes,
         estimated=task.estimated,
         duration_source=task.duration_source,
-        notes=(task.notes + "\n" if task.notes else "") + f"Teilblock: ursprünglich {task.duration_minutes} Minuten.",
+        notes=notes,
     )
 
 
@@ -601,6 +619,10 @@ def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int,
     )
 
 
+def is_partial_task(task: Task) -> bool:
+    return "Teilblock:" in task.notes
+
+
 def choose_task(
     tasks: list[Task],
     slot_start: datetime,
@@ -611,6 +633,8 @@ def choose_task(
     mini_count: int,
     large_evening_count: int,
     partial_count: int,
+    split_task_ids: set[str] | None,
+    split_part_numbers: dict[str, int] | None,
     has_full_workshop_day: bool,
     late_evening_p4_count: int,
     light_after_large_evening_count: int,
@@ -632,19 +656,22 @@ def choose_task(
                     fitting_minutes,
                     int((werkstatt_window.end - slot_start).total_seconds() // 60),
                 )
+        if task.id in (split_task_ids or set()) and task.duration_minutes <= fitting_minutes and task.duration_minutes <= remaining_capacity:
+            candidate = make_werkstatt_partial_task(task, task.duration_minutes, (split_part_numbers or {}).get(task.id, 0) + 1)
         if task.duration_minutes > fitting_minutes or task.duration_minutes > remaining_capacity:
             if (
                 task.category == "Werkstatt"
                 and task.duration_minutes >= WERKSTATT_GAP_MINUTES
                 and fitting_minutes >= WERKSTATT_GAP_MINUTES
                 and remaining_capacity >= WERKSTATT_GAP_MINUTES
-                and partial_count < MAX_PARTIAL_BLOCKS_PER_DAY
+                and (task.id in (split_task_ids or set()) or partial_count < MAX_PARTIAL_BLOCKS_PER_DAY)
                 and is_safely_partial_werkstatt_task(task)
             ):
                 partial_minutes = min(WERKSTATT_PARTIAL_BLOCK_MINUTES, fitting_minutes, remaining_capacity)
                 if partial_minutes < WERKSTATT_GAP_MINUTES:
                     continue
-                candidate = make_werkstatt_partial_task(task, partial_minutes)
+                part_number = (split_part_numbers or {}).get(task.id, 0) + 1
+                candidate = make_werkstatt_partial_task(task, partial_minutes, part_number)
             else:
                 continue
         if lesson_gap:
@@ -678,6 +705,19 @@ def choose_task(
         ]
         if short_high_priority:
             return sorted(short_high_priority, key=lambda task: task_sort_key(task, slot_start))[0]
+
+    continued = [task for task in fitting if split_task_ids and task.id in split_task_ids and is_partial_task(task)]
+    if continued:
+        best_continuation = sorted(continued, key=lambda task: task_sort_key(task, slot_start))[0]
+        better_new = [
+            task
+            for task in fitting
+            if task.id not in split_task_ids
+            and PRIORITY_ORDER.get(task.priority, 99) + 1 < PRIORITY_ORDER.get(best_continuation.priority, 99)
+            and task.duration_minutes <= gap_minutes
+        ]
+        if not better_new:
+            return best_continuation
 
     return sorted(fitting, key=lambda task: task_sort_key(task, slot_start))[0]
 
@@ -810,11 +850,15 @@ def build_load_diagnostics(
 def rejection_reason(task: Task, blocks: list[Block]) -> str:
     has_homecoming_pause = any(block.id == "daily-homecoming-evening-pause" for block in blocks)
     if has_homecoming_pause and task.category in {"Studio", "ALEGRA"} and task.duration_minutes >= LARGE_EVENING_TASK_MINUTES:
-        return "Abend-Fokuslimit erreicht oder Tageslast zu hoch."
+        return "Tageslast zu hoch für schwere Abendaufgabe; Abend-Fokuslimit erreicht."
     if has_homecoming_pause and task.duration_minutes > MINI_TASK_MAX_MINUTES and task.category in {"Privat", "Haushalt", "Buchhaltung"}:
-        return "durch Heimkehr-/Abendpause blockiert oder Tageslast zu hoch."
+        return "durch Heimkehr-/Abendpause geschützt; Tageslast zu hoch."
+    if task.duration_minutes >= 120:
+        return "120 Min. zu lang für verbleibende Lücken."
+    if task.category == "Werkstatt" and task.duration_minutes >= 90:
+        return "kein ausreichend langes Werkstattfenster mehr frei."
     if task.priority in {"P1", "P2"}:
-        return "Höhere Priorität blieb offen: passte nicht mehr in passende 15–45-Minuten-Lücken, Werkstattfenster, Kapazitätslimit oder Aufgabenlimit."
+        return "wichtige Aufgabe blieb offen: verbleibende Lücken, Kapazität oder Aufgabenlimit reichten nicht."
     if task.duration_minutes > LONG_TASK_THRESHOLD_MINUTES:
         return f"Dauer {task.duration_minutes} Minuten ist über {LONG_TASK_THRESHOLD_MINUTES} Minuten."
     if task.category == "Soundwerk" and soundwerk_lesson_blocks(blocks):
@@ -880,6 +924,9 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
     late_evening_p4_count = 0
     light_after_large_evening_count = 0
     partial_count = 0
+    split_task_ids: set[str] = set()
+    split_part_numbers: dict[str, int] = {}
+    partial_diagnostics: list[str] = []
     has_full_workshop_day = any(
         is_werkstatt_availability_block(block) and block.start.time() <= time(9, 0) and block.end.time() >= time(17, 0)
         for block in fixed_blocks
@@ -898,6 +945,8 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
                 mini_count,
                 large_evening_count,
                 partial_count,
+                split_task_ids,
+                split_part_numbers,
                 has_full_workshop_day,
                 late_evening_p4_count,
                 light_after_large_evening_count,
@@ -934,14 +983,43 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
                 and is_evening_light_task(task)
             ):
                 light_after_large_evening_count += 1
-            if "Teilblock:" in task.notes:
-                partial_count += 1
-            remaining_tasks.remove(next(original for original in remaining_tasks if original.id == task.id))
+            original_task = next(original for original in remaining_tasks if original.id == task.id)
+            if is_partial_task(task):
+                if task.id not in split_task_ids:
+                    split_task_ids.add(task.id)
+                    partial_count += 1
+                split_part_numbers[task.id] = split_part_numbers.get(task.id, 0) + 1
+                if split_part_numbers[task.id] > 1:
+                    partial_diagnostics.append(f"Fortsetzung von Teilblock: {original_task.title}.")
+                remaining_minutes = original_task.duration_minutes - task.duration_minutes
+                if remaining_minutes >= WERKSTATT_GAP_MINUTES:
+                    remaining_tasks[remaining_tasks.index(original_task)] = Task(
+                        id=original_task.id,
+                        title=original_task.title,
+                        category=original_task.category,
+                        priority=original_task.priority,
+                        duration_minutes=remaining_minutes,
+                        estimated=original_task.estimated,
+                        duration_source=original_task.duration_source,
+                        notes=original_task.notes,
+                    )
+                else:
+                    remaining_tasks.remove(original_task)
+            else:
+                remaining_tasks.remove(original_task)
             cursor = end + timedelta(minutes=buffer_after or DEFAULT_BUFFER_MINUTES)
 
     not_scheduled = [RejectedTask(task, rejection_reason(task, fixed_blocks)) for task in remaining_tasks]
     workshop_diagnostics = build_workshop_diagnostics(target_day, fixed_blocks, planned_blocks, remaining_tasks)
     load_diagnostics = build_load_diagnostics(planned_blocks, remaining_tasks, large_evening_count, partial_count, has_full_workshop_day)
+    if split_task_ids:
+        continuation_count = sum(1 for parts in split_part_numbers.values() if parts > 1)
+        load_diagnostics.append(f"{len(split_task_ids)} Aufgabe(n) in Teilblöcken geplant; {continuation_count} davon fortgesetzt.")
+        load_diagnostics.extend(partial_diagnostics)
+        for task_id in sorted(split_task_ids):
+            if split_part_numbers.get(task_id, 0) < 2 and any(task.id == task_id for task in remaining_tasks):
+                title = next(task.title for task in remaining_tasks if task.id == task_id)
+                load_diagnostics.append(f"Teilblock nicht fortgesetzt: {title} – kein passendes Fenster oder Tageslast/Abendregel.")
 
     return PlanResult(
         target_day=target_day,
@@ -1120,26 +1198,48 @@ def is_lesson_gap_window(window: TimeWindow, blocks: list[Block]) -> bool:
 def plan_status(plan: PlanResult) -> str:
     if plan.validation_errors or plan.calendar_write_blocked_warning:
         return "BLOCKIERT"
-    if plan.warnings or important_open_tasks(plan):
+    if plan.warnings or important_open_tasks(plan) or plan_quality(plan) < 8:
         return "PRÜFEN"
     return "SCHREIBBAR"
 
 
-def plan_quality(plan: PlanResult) -> int:
+def plan_quality_details(plan: PlanResult) -> tuple[int, list[str]]:
     score = 10
+    reasons: list[str] = []
     if plan.validation_errors:
         score -= 4
+        reasons.append("Planvalidierung fehlgeschlagen oder Überschneidungen erkannt")
     if plan.calendar_write_blocked_warning:
         score -= 2
+        reasons.append("Kalender-Schreiben wurde durch Sicherheitsgate blockiert")
     if plan.warnings:
         score -= min(2, len(plan.warnings))
+        reasons.extend(plan.warnings[:2])
     open_high = len(important_open_tasks(plan))
     score -= min(3, open_high)
+    if open_high:
+        reasons.append("Mehrere P1/P2-Aufgaben offen geblieben" if open_high > 1 else "Eine P1/P2-Aufgabe offen geblieben")
     if not plan.planned_blocks:
         score -= 2
+        reasons.append("Keine Aufgaben automatisch eingeplant")
     if plan.capacity_minutes and plan.planned_minutes > plan.capacity_minutes:
         score -= 3
-    return max(0, min(10, score))
+        reasons.append("Geplante Zeit überschreitet Kapazitätslimit")
+    estimated_count = sum(1 for block in plan.planned_blocks if block.task.estimated)
+    if estimated_count >= 3:
+        score -= 1
+        reasons.append("Viele Aufgaben haben nur geschätzte Dauer")
+    if any("Abend-Fokuslimit" in item.reason or "Tageslast" in item.reason for item in plan.not_scheduled):
+        reasons.append("Abend-Fokuslimit erreicht oder Tageslast zu hoch")
+    if any(item.task.category == "Buchhaltung" and item.task.priority in {"P1", "P2"} for item in important_open_tasks(plan)):
+        reasons.append("Buchhaltungs-/Admin-Aufgaben wegen Tageslast nicht eingeplant")
+    if any(item.task.category == "Werkstatt" and item.task.priority in {"P1", "P2"} for item in important_open_tasks(plan)):
+        reasons.append("Werkstattaufgaben konnten wegen fehlender langer Werkstattfenster nicht eingeplant werden")
+    return max(0, min(10, score)), list(dict.fromkeys(reasons))
+
+
+def plan_quality(plan: PlanResult) -> int:
+    return plan_quality_details(plan)[0]
 
 
 def important_open_tasks(plan: PlanResult) -> list[RejectedTask]:
@@ -1156,7 +1256,8 @@ def render_plan_card(plan: PlanResult) -> list[str]:
     lines.append("# Plan Card")
     lines.append(f"- Tagesplan: {weekday}, {plan.target_day.isoformat()}")
     lines.append(f"- Status: {status}")
-    lines.append(f"- Planqualität: {plan_quality(plan)}/10")
+    quality, quality_reasons = plan_quality_details(plan)
+    lines.append(f"- Planqualität: {quality}/10")
     if plan.planned_blocks:
         short = "; ".join(
             f"{fmt(block.start)}–{fmt(block.end)} {block.task.title}" for block in plan.planned_blocks[:5]
@@ -1166,10 +1267,12 @@ def render_plan_card(plan: PlanResult) -> list[str]:
     else:
         lines.append("- Kurzplan: Keine Aufgaben automatisch eingeplant.")
 
-    important_warnings = list(dict.fromkeys(plan.validation_errors + plan.warnings))[:5]
+    important_warnings = list(dict.fromkeys(plan.validation_errors + plan.warnings + quality_reasons))[:5]
     lines.append("- Wichtige Warnungen:")
     if important_warnings:
         lines.extend(f"  - {warning}" for warning in important_warnings)
+    elif status in {"PRÜFEN", "BLOCKIERT"}:
+        lines.append("  - Status erfordert Prüfung; bitte Details im Plan prüfen.")
     else:
         lines.append("  - Keine.")
 
