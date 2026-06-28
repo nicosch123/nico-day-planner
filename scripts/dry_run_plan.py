@@ -40,6 +40,13 @@ LONG_TASK_THRESHOLD_MINUTES = 120
 DEFAULT_ESTIMATED_DURATION_MINUTES = 30
 DEFAULT_BUFFER_MINUTES = 15
 RESET_BUFFER_MINUTES = 15
+MANUAL_EVENT_PRE_BUFFER_MINUTES = 15
+LUNCH_BREAK_START = time(12, 0)
+LUNCH_BREAK_END = time(13, 0)
+LESSON_GAP_MINUTES = 45
+LESSON_GAP_TASK_MAX_MINUTES = 60
+LESSON_GAP_PREFERRED_MAX_MINUTES = 45
+LESSON_GAP_CATEGORIES = {"Soundwerk", "Buchhaltung", "Privat", "Haushalt", "ALEGRA"}
 MAX_MAIN_TASKS = 6
 MAX_MINI_TASKS = 2
 MINI_TASK_MAX_MINUTES = 15
@@ -271,6 +278,17 @@ def weekly_blocks(target_day: date) -> list[Block]:
     return blocks
 
 
+def lunch_break_block(target_day: date) -> Block:
+    return Block(
+        id="daily-lunch-break",
+        title="Mittagspause",
+        start=datetime.combine(target_day, LUNCH_BREAK_START),
+        end=datetime.combine(target_day, LUNCH_BREAK_END),
+        source="Tagesregel",
+        categories=("Pause",),
+    )
+
+
 def travel_blocks(blocks: list[Block]) -> list[Block]:
     sorted_blocks = sorted([block for block in blocks if block.location], key=lambda block: block.start)
     travel: list[Block] = []
@@ -309,6 +327,28 @@ def planning_blockers(blocks: list[Block]) -> list[Block]:
     fixed weekly structure entries remain hard blockers.
     """
     return [block for block in blocks if not is_werkstatt_availability_block(block)]
+
+
+def buffered_planning_blockers(blocks: list[Block]) -> list[Block]:
+    """Return blockers expanded by the required pre-buffer before fixed events."""
+    buffered: list[Block] = []
+    for block in planning_blockers(blocks):
+        start = block.start
+        if block.source != "Tagesregel":
+            start -= timedelta(minutes=MANUAL_EVENT_PRE_BUFFER_MINUTES)
+        buffered.append(
+            Block(
+                id=f"buffered-{block.id}",
+                title=block.title,
+                start=start,
+                end=block.end,
+                source=block.source,
+                categories=block.categories,
+                location=block.location,
+                soft=block.soft,
+            )
+        )
+    return buffered
 
 
 def werkstatt_window_for_day(target_day: date) -> TimeWindow | None:
@@ -355,6 +395,28 @@ def soundwerk_lesson_blocks(blocks: list[Block]) -> list[Block]:
     return [block for block in blocks if "Soundwerk" in block.categories]
 
 
+def is_lesson_gap(start: datetime, end: datetime, blocks: list[Block]) -> bool:
+    hard_blocks = sorted(planning_blockers(blocks), key=lambda block: block.start)
+    previous_block = next((block for block in reversed(hard_blocks) if block.end <= start), None)
+    next_block = next((block for block in hard_blocks if block.start >= end), None)
+    if previous_block is None or next_block is None:
+        return False
+    gap_minutes = int((next_block.start - previous_block.end).total_seconds() // 60)
+    return (
+        previous_block.source == "Google Calendar"
+        and next_block.source == "Google Calendar"
+        and gap_minutes >= LESSON_GAP_MINUTES
+    )
+
+
+def is_lesson_gap_task(task: Task) -> bool:
+    if task.category not in LESSON_GAP_CATEGORIES:
+        return False
+    if task.duration_minutes > LESSON_GAP_TASK_MAX_MINUTES:
+        return False
+    return True
+
+
 def in_hour_before_soundwerk(task: Task, start: datetime, end: datetime, blocks: list[Block]) -> bool:
     if task.category != "Soundwerk":
         return True
@@ -370,8 +432,10 @@ def violates_time_rule(task: Task, start: datetime, end: datetime, blocks: list[
         werkstatt_window = werkstatt_window_for_day(start.date())
         if werkstatt_window is None or start < werkstatt_window.start or end > werkstatt_window.end:
             return "Werkstatt-Aufgaben werden nur in der bevorzugten Werkstattzeit geplant."
-    elif werkstatt_window_for_day(start.date()) and overlaps(
-        start, end, werkstatt_window_for_day(start.date()).start, werkstatt_window_for_day(start.date()).end
+    elif (
+        werkstatt_window_for_day(start.date())
+        and overlaps(start, end, werkstatt_window_for_day(start.date()).start, werkstatt_window_for_day(start.date()).end)
+        and not (is_lesson_gap(start, end, blocks) and is_lesson_gap_task(task))
     ):
         return "Nicht-Werkstatt-Aufgaben werden nicht in die bevorzugte Werkstattzeit gestreut."
     if task.category == "Buchhaltung" and end.time() > BUCHHALTUNG_LATEST_END:
@@ -403,6 +467,7 @@ def choose_task(
 ) -> Task | None:
     fitting: list[Task] = []
     gap_minutes = int((slot_end - slot_start).total_seconds() // 60)
+    lesson_gap = is_lesson_gap(slot_start, slot_end, blocks)
     for task in tasks:
         if is_mini_task(task) and mini_count >= MAX_MINI_TASKS:
             continue
@@ -410,6 +475,11 @@ def choose_task(
             continue
         if task.duration_minutes > gap_minutes or task.duration_minutes > remaining_capacity:
             continue
+        if lesson_gap:
+            if not is_lesson_gap_task(task):
+                continue
+            if gap_minutes >= 60 and task.duration_minutes > LESSON_GAP_PREFERRED_MAX_MINUTES:
+                continue
         end = slot_start + timedelta(minutes=task.duration_minutes)
         if violates_time_rule(task, slot_start, end, blocks):
             continue
@@ -456,10 +526,10 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
         calendar_source, target_day
     )
     warnings.extend(calendar_warnings)
-    fixed_blocks = calendar_blocks + weekly_blocks(target_day)
+    fixed_blocks = calendar_blocks + weekly_blocks(target_day) + [lunch_break_block(target_day)]
     fixed_blocks += travel_blocks(fixed_blocks)
     fixed_blocks = merge_overlapping(fixed_blocks)
-    hard_blockers = planning_blockers(fixed_blocks)
+    hard_blockers = buffered_planning_blockers(fixed_blocks)
     free_windows = find_free_windows(target_day, hard_blockers)
     free_minutes = sum(window.minutes for window in free_windows)
     capacity_minutes = int(free_minutes * MAX_PLANNED_PERCENT / 100)
@@ -587,6 +657,15 @@ def validate_planned_blocks(plan: PlanResult) -> list[str]:
                     f"{render_task(planned.task)} {fmt(planned.start)}–{fmt(planned.end)} überschneidet "
                     f"{fixed.title} {fmt(fixed.start)}–{fmt(fixed.end)} ({fixed.source})."
                 )
+            if fixed.source != "Tagesregel" and planned.end <= fixed.start:
+                buffer_minutes = int((fixed.start - planned.end).total_seconds() // 60)
+                if buffer_minutes < MANUAL_EVENT_PRE_BUFFER_MINUTES:
+                    errors.append(
+                        "Zu wenig Puffer vor blockiertem Kalendertermin: "
+                        f"{render_task(planned.task)} endet {fmt(planned.end)}, "
+                        f"{fixed.title} startet {fmt(fixed.start)} ({fixed.source}); "
+                        f"mindestens {MANUAL_EVENT_PRE_BUFFER_MINUTES} Minuten erforderlich."
+                    )
     return errors
 
 
