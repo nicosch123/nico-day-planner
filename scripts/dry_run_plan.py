@@ -85,6 +85,25 @@ WERKSTATT_WINDOWS: dict[int, tuple[time, time]] = {
 }
 PRIORITY_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
 
+GOOGLE_CALENDAR_CATEGORY_COLORS: dict[str, str] = {
+    "Werkstatt": "10",  # Basilikum
+    "Studio": "2",  # Salbei
+    "ALEGRA": "1",  # Lavendel
+    "Privat": "7",  # Pfau
+    "LIVE": "7",  # Pfau, bis eine eigene Farbe festgelegt ist
+    "Soundwerk": "11",  # Tomate
+    "SW": "11",  # Tomate
+    "HOFA": "6",  # Mandarine
+    "Hofa": "6",  # Mandarine
+    "Fahrten": "5",  # Banane
+    "Fahrt": "5",  # Banane
+}
+
+
+def google_calendar_color_id_for_category(category: str) -> str | None:
+    """Return the Google Calendar colorId for a planner category, if configured."""
+    return GOOGLE_CALENDAR_CATEGORY_COLORS.get(category.strip())
+
 WEEKLY_STRUCTURE: dict[int, list[dict[str, Any]]] = {
     0: [
         {"title": "Werkstatt Mengen", "start": "09:00", "end": "17:00", "location": "Mengen", "categories": ["Werkstatt"]},
@@ -958,12 +977,16 @@ def _calendar_event_datetime(value: datetime) -> dict[str, str]:
 
 def _calendar_event_body(block: PlannedBlock) -> dict[str, Any]:
     task = block.task
-    return {
+    event_body = {
         "summary": f"[{task.category}] {task.title}",
         "description": _calendar_event_description(block),
         "start": _calendar_event_datetime(block.start),
         "end": _calendar_event_datetime(block.end),
     }
+    color_id = google_calendar_color_id_for_category(task.category)
+    if color_id is not None:
+        event_body["colorId"] = color_id
+    return event_body
 
 
 def validate_planned_blocks(plan: PlanResult) -> list[str]:
