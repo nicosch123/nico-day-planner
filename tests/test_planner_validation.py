@@ -196,12 +196,14 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             dry_run_plan.load_tasks_for_source = original_load_tasks
             dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
 
-        self.assertEqual(len(plan.planned_blocks), 2)
+        self.assertEqual(len(plan.planned_blocks), 3)
         self.assertEqual(plan.planned_blocks[0].start, datetime(2026, 6, 29, 9, 0))
         self.assertEqual(plan.planned_blocks[0].end, datetime(2026, 6, 29, 10, 30))
         self.assertEqual(plan.planned_blocks[1].start, datetime(2026, 6, 29, 10, 45))
         self.assertEqual(plan.planned_blocks[1].end, datetime(2026, 6, 29, 11, 45))
         self.assertIn("Teil 1", plan.planned_blocks[1].task.title)
+        self.assertEqual(plan.planned_blocks[2].start, datetime(2026, 6, 29, 13, 0))
+        self.assertIn("Teil 2", plan.planned_blocks[2].task.title)
 
     def test_validation_requires_buffer_before_manual_event(self) -> None:
         target_day = date(2026, 6, 29)
@@ -357,8 +359,52 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             dry_run_plan.load_tasks_for_source = original_load_tasks
             dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
 
-        partials = [block for block in plan.planned_blocks if "Teilblock:" in block.task.notes]
-        self.assertLessEqual(len(partials), 2)
+        partial_task_ids = {block.task.id for block in plan.planned_blocks if "Teilblock:" in block.task.notes}
+        self.assertLessEqual(len(partial_task_ids), 2)
+
+    def test_partial_task_continues_after_lunch_before_lower_priority_work(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [
+                    Task("echolette", "Echolette NG51 fertigziehen", "Werkstatt", "P1", 120),
+                    Task("kabel", "Alexander Kabellöten", "Werkstatt", "P2", 45),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: (
+                [
+                    Block(
+                        "termin-vormittag",
+                        "Termin vor Mittag",
+                        datetime(2026, 6, 29, 10, 15),
+                        datetime(2026, 6, 29, 12, 0),
+                        "Google Calendar",
+                    ),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+
+            plan = build_plan("todoist", date(2026, 6, 29), "google")
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        titles = [block.task.title for block in plan.planned_blocks]
+        self.assertIn("Echolette NG51 fertigziehen – Teil 1", titles)
+        self.assertIn("Echolette NG51 fertigziehen – Teil 2", titles)
+        self.assertLess(
+            titles.index("Echolette NG51 fertigziehen – Teil 2"),
+            titles.index("Alexander Kabellöten"),
+        )
+        self.assertTrue(any("Fortsetzung von Teilblock: Echolette NG51 fertigziehen" in detail for detail in plan.load_diagnostics))
 
     def test_render_plan_card_limits_warnings_and_open_high_priority_tasks(self) -> None:
         planned = PlannedBlock(
