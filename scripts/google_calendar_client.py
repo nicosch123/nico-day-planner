@@ -239,6 +239,7 @@ def _event_summary(event: dict[str, Any], target_date: date) -> dict[str, Any]:
     return {
         "id": str(event.get("id", "google-calendar-unknown")),
         "title": title,
+        "description": str(event.get("description") or ""),
         "start": start,
         "end": end,
         "source": "Google Calendar",
