@@ -286,6 +286,16 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             if block.start >= datetime(2026, 6, 29, 17, 0) and block.task.duration_minutes >= 60
         ]
         self.assertLessEqual(len(large_evening), 1)
+        self.assertFalse(
+            [
+                block
+                for block in plan.planned_blocks
+                if datetime(2026, 6, 29, 17, 0) <= block.start < datetime(2026, 6, 29, 19, 30)
+            ]
+        )
+        self.assertTrue(
+            any(block.title == "Heimfahrt / Essen / Duschen / Pause" for block in plan.fixed_blocks)
+        )
         self.assertTrue(any("Große Abendblöcke" in detail for detail in plan.load_diagnostics))
 
     def test_partial_blocks_are_limited_to_two_per_day(self) -> None:
