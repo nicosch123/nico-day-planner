@@ -610,6 +610,131 @@ class WeeklyPlannerSafetyTest(unittest.TestCase):
         self.assertNotIn("Whammy Thilo [Werkstatt P1]", created)
         self.assertIn("Echolette NG51 fertigziehen [Werkstatt P1]", created)
 
+
+    def test_week_plan_excludes_day_auto_task_by_todoist_id(self) -> None:
+        original_tasks = planner.load_tasks_for_source
+        original_blocks = planner.fixed_blocks_for_week_day
+        try:
+            planner.load_tasks_for_source = lambda _source: (
+                [
+                    Task("w1", "Whammy Thilo", "Werkstatt", "P1", 90),
+                    Task("w2", "Echolette NG51 fertigziehen", "Werkstatt", "P1", 75),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            planner.fixed_blocks_for_week_day = lambda day: ([], [], day == date(2026, 6, 29), {"w1"} if day == date(2026, 6, 29) else set(), set())
+
+            plan = planner.build_week_plan(date(2026, 6, 29), 3)
+        finally:
+            planner.load_tasks_for_source = original_tasks
+            planner.fixed_blocks_for_week_day = original_blocks
+
+        titles = [block.task.title for blocks in plan["planned"].values() for block in blocks]
+        self.assertFalse(any("Whammy Thilo" in title for title in titles))
+        self.assertFalse(any(task.id == "w1" for task in plan["open_high"]))
+        self.assertIn("1 Aufgabe(n) bereits durch Tagesplanung abgedeckt.", plan["warnings"])
+
+    def test_week_plan_excludes_day_auto_task_by_normalized_title(self) -> None:
+        original_tasks = planner.load_tasks_for_source
+        original_blocks = planner.fixed_blocks_for_week_day
+        try:
+            planner.load_tasks_for_source = lambda _source: (
+                [
+                    Task("a1", "Wenn du tanzt Release finalisieren", "ALEGRA", "P1", 90),
+                    Task("a2", "Tim Finanzen", "ALEGRA", "P2", 30),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            covered_title = planner.normalize_week_task_title("Wenn du tanzt Release finalisieren – Teil 1 [ALEGRA P1]")
+            planner.fixed_blocks_for_week_day = lambda day: ([], [], day == date(2026, 6, 29), set(), {covered_title} if day == date(2026, 6, 29) else set())
+
+            plan = planner.build_week_plan(date(2026, 6, 29), 4)
+        finally:
+            planner.load_tasks_for_source = original_tasks
+            planner.fixed_blocks_for_week_day = original_blocks
+
+        titles = [block.task.title for blocks in plan["planned"].values() for block in blocks]
+        self.assertFalse(any("Wenn du tanzt" in title for title in titles))
+        self.assertTrue(any("Tim Finanzen" in title for title in titles))
+        self.assertFalse(any(task.id == "a1" for task in plan["open_high"]))
+
+    def test_week_plan_communication_bundle_omits_day_auto_tasks(self) -> None:
+        original_tasks = planner.load_tasks_for_source
+        original_blocks = planner.fixed_blocks_for_week_day
+        try:
+            planner.load_tasks_for_source = lambda _source: (
+                [
+                    Task("a1", "Tim Finanzen", "ALEGRA", "P2", 30),
+                    Task("s1", "Anna Song1 Feedback nachfragen", "Studio", "P1", 15),
+                    Task("s2", "Termine für Alisa Klavieraufnahme checken", "Studio", "P1", 15),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            planner.fixed_blocks_for_week_day = lambda day: ([], [], day == date(2026, 6, 29), {"a1"} if day == date(2026, 6, 29) else set(), set())
+
+            plan = planner.build_week_plan(date(2026, 6, 29), 5)
+        finally:
+            planner.load_tasks_for_source = original_tasks
+            planner.fixed_blocks_for_week_day = original_blocks
+
+        titles = [block.task.title for blocks in plan["planned"].values() for block in blocks]
+        communication_titles = [title for title in titles if "Kommunikation" in title]
+        self.assertTrue(communication_titles)
+        self.assertFalse(any("Tim Finanzen" in title for title in communication_titles))
+
+    def test_week_plan_uses_multiple_workshop_and_alegra_blocks(self) -> None:
+        original_tasks = planner.load_tasks_for_source
+        original_blocks = planner.fixed_blocks_for_week_day
+        try:
+            planner.load_tasks_for_source = lambda _source: (
+                [
+                    Task("w1", "Echolette NG51 fertigziehen", "Werkstatt", "P1", 90),
+                    Task("w2", "SPL Transient Designer", "Werkstatt", "P2", 90),
+                    Task("w3", "HK Audio Lucas Impact", "Werkstatt", "P2", 120),
+                    Task("a1", "Spotify for Artists Pitch / Canvas / Clips vorbereiten", "ALEGRA", "P1", 60),
+                    Task("a2", "WDT Live Session fertig", "ALEGRA", "P1", 75),
+                    Task("a3", "Wenn du tanzt Release finalisieren", "ALEGRA", "P1", 90),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            planner.fixed_blocks_for_week_day = lambda _day: ([], [], False, set(), set())
+
+            plan = planner.build_week_plan(date(2026, 7, 1), 2)
+        finally:
+            planner.load_tasks_for_source = original_tasks
+            planner.fixed_blocks_for_week_day = original_blocks
+
+        wednesday = plan["planned"][date(2026, 7, 1)]
+        thursday = plan["planned"][date(2026, 7, 2)]
+        self.assertGreaterEqual(sum(1 for block in wednesday if block.task.category == "Werkstatt"), 2)
+        self.assertGreaterEqual(sum(1 for block in thursday if block.task.category == "ALEGRA"), 3)
+        self.assertTrue(any("Wenn du tanzt" in block.task.title for block in thursday))
+
+    def test_day_auto_covered_keys_extracts_id_and_normalized_title(self) -> None:
+        event = Block(
+            "day-1",
+            "Whammy Thilo – Teil 1 [Werkstatt P1]",
+            datetime(2026, 6, 29, 9, 0),
+            datetime(2026, 6, 29, 10, 0),
+            "Google Calendar",
+            description="NICO_DAY_PLANNER_AUTO\nTodoist Task ID: w1",
+        )
+        ids, titles = planner.day_auto_covered_keys([event])
+        self.assertEqual(ids, {"w1"})
+        self.assertIn("whammy thilo", titles)
+
     def test_week_preview_prefers_concrete_tasks_and_bundles_communication(self) -> None:
         original_tasks = planner.load_tasks_for_source
         original_blocks = planner.fixed_blocks_for_week_day
