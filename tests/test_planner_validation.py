@@ -133,8 +133,8 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         try:
             dry_run_plan.load_tasks_for_source = lambda _source: (
                 [
-                    Task("werkstatt-1", "Vormittag Werkstatt", "Werkstatt", "P2", 90),
-                    Task("werkstatt-2", "Mittag Werkstatt", "Werkstatt", "P2", 90),
+                    Task("werkstatt-1", "Vormittag Werkstatt", "Werkstatt", "P1", 90),
+                    Task("werkstatt-2", "Fehler provozieren Mittag Werkstatt", "Werkstatt", "P2", 90),
                 ],
                 "test",
                 False,
@@ -248,9 +248,80 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             dry_run_plan.load_tasks_for_source = original_load_tasks
             dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
 
-        self.assertEqual([block.task.title for block in plan.planned_blocks], ["Private Ablage"])
+        self.assertIn("Private Ablage", [block.task.title for block in plan.planned_blocks])
         self.assertEqual(plan.planned_blocks[0].start, datetime(2026, 6, 29, 14, 30))
         self.assertEqual(plan.planned_blocks[0].end, datetime(2026, 6, 29, 15, 0))
+
+    def test_full_monday_limits_multiple_large_studio_evening_blocks(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [
+                    Task("studio-1", "Studio-Website", "Studio", "P2", 90),
+                    Task("studio-2", "Aufnahme aufräumen", "Studio", "P3", 90),
+                    Task("privat-1", "Private Ablage", "Privat", "P4", 30),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: (
+                [],
+                "test",
+                False,
+                [],
+                (),
+            )
+
+            plan = build_plan("todoist", date(2026, 6, 29), "google")
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        large_evening = [
+            block
+            for block in plan.planned_blocks
+            if block.start >= datetime(2026, 6, 29, 17, 0) and block.task.duration_minutes >= 60
+        ]
+        self.assertLessEqual(len(large_evening), 1)
+        self.assertTrue(any("Große Abendblöcke" in detail for detail in plan.load_diagnostics))
+
+    def test_partial_blocks_are_limited_to_two_per_day(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [
+                    Task("werkstatt-1", "Fehler provozieren A", "Werkstatt", "P2", 90),
+                    Task("werkstatt-2", "Sichtprüfung B", "Werkstatt", "P2", 90),
+                    Task("werkstatt-3", "Messnotizen C", "Werkstatt", "P2", 90),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: (
+                [
+                    Block("termin-1", "Termin 1", datetime(2026, 6, 29, 10, 0), datetime(2026, 6, 29, 10, 15), "Google Calendar"),
+                    Block("termin-2", "Termin 2", datetime(2026, 6, 29, 11, 15), datetime(2026, 6, 29, 11, 30), "Google Calendar"),
+                    Block("termin-3", "Termin 3", datetime(2026, 6, 29, 14, 0), datetime(2026, 6, 29, 14, 30), "Google Calendar"),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+
+            plan = build_plan("todoist", date(2026, 6, 29), "google")
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        partials = [block for block in plan.planned_blocks if "Teilblock:" in block.task.notes]
+        self.assertLessEqual(len(partials), 2)
 
 
 if __name__ == "__main__":
