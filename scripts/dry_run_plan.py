@@ -50,6 +50,19 @@ LESSON_GAP_CATEGORIES = {"Soundwerk", "Buchhaltung", "Privat", "Haushalt", "ALEG
 MAX_MAIN_TASKS = 6
 MAX_MINI_TASKS = 2
 MINI_TASK_MAX_MINUTES = 15
+WERKSTATT_GAP_MINUTES = 30
+WERKSTATT_PARTIAL_BLOCK_MINUTES = 60
+WERKSTATT_SMALL_KEYWORDS = (
+    "diagnose vorbereiten",
+    "fehler provozieren",
+    "ersatzteile",
+    "kundenupdate",
+    "sichtprüfung",
+    "messnotizen",
+    "arbeitsplatz aufräumen",
+    "notizen",
+    "gerät öffnen",
+)
 BUCHHALTUNG_LATEST_END = time(21, 0)
 DEFAULT_CALENDAR_TIME_ZONE = "Europe/Berlin"
 WERKSTATT_DIAGNOSIS_LATEST_END = time(18, 0)
@@ -166,6 +179,7 @@ class PlanResult:
     calendar_created_events: int = 0
     calendar_deleted_events: int = 0
     validation_errors: list[str] = field(default_factory=list)
+    workshop_diagnostics: list[str] = field(default_factory=list)
 
 
 def parse_hhmm(value: str) -> time:
@@ -447,13 +461,38 @@ def violates_time_rule(task: Task, start: datetime, end: datetime, blocks: list[
     return None
 
 
-def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, str]:
+def is_preferred_small_werkstatt_task(task: Task) -> bool:
+    title = task.title.lower()
+    return task.category == "Werkstatt" and any(keyword in title for keyword in WERKSTATT_SMALL_KEYWORDS)
+
+
+def make_werkstatt_partial_task(task: Task, minutes: int) -> Task:
+    return Task(
+        id=task.id,
+        title=f"{task.title} – Teil 1",
+        category=task.category,
+        priority=task.priority,
+        duration_minutes=minutes,
+        estimated=task.estimated,
+        duration_source=task.duration_source,
+        notes=(task.notes + "\n" if task.notes else "") + f"Teilblock: ursprünglich {task.duration_minutes} Minuten.",
+    )
+
+
+def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int, str]:
     priority_rank = PRIORITY_ORDER.get(task.priority, 99)
     evening_bonus = 0
     if task.category == "Buchhaltung" and slot_start.time() >= time(18, 0):
         evening_bonus = -1
     household_penalty = 1 if task.category == "Haushalt" and task.duration_minutes > 15 else 0
-    return (priority_rank + evening_bonus + household_penalty, task.duration_minutes, 1 if task.estimated else 0, task.title)
+    werkstatt_small_bonus = -1 if is_preferred_small_werkstatt_task(task) else 0
+    return (
+        priority_rank + evening_bonus + household_penalty + werkstatt_small_bonus,
+        task.duration_minutes,
+        1 if task.estimated else 0,
+        0 if task.category == "Werkstatt" else 1,
+        task.title,
+    )
 
 
 def choose_task(
@@ -473,17 +512,37 @@ def choose_task(
             continue
         if not is_mini_task(task) and main_count >= MAX_MAIN_TASKS:
             continue
-        if task.duration_minutes > gap_minutes or task.duration_minutes > remaining_capacity:
-            continue
+        candidate = task
+        fitting_minutes = gap_minutes
+        if task.category == "Werkstatt":
+            werkstatt_window = werkstatt_window_for_day(slot_start.date())
+            if werkstatt_window is not None and slot_start < werkstatt_window.end:
+                fitting_minutes = min(
+                    fitting_minutes,
+                    int((werkstatt_window.end - slot_start).total_seconds() // 60),
+                )
+        if task.duration_minutes > fitting_minutes or task.duration_minutes > remaining_capacity:
+            if (
+                task.category == "Werkstatt"
+                and task.duration_minutes >= WERKSTATT_GAP_MINUTES
+                and fitting_minutes >= WERKSTATT_GAP_MINUTES
+                and remaining_capacity >= WERKSTATT_GAP_MINUTES
+            ):
+                partial_minutes = min(WERKSTATT_PARTIAL_BLOCK_MINUTES, fitting_minutes, remaining_capacity)
+                if partial_minutes < WERKSTATT_GAP_MINUTES:
+                    continue
+                candidate = make_werkstatt_partial_task(task, partial_minutes)
+            else:
+                continue
         if lesson_gap:
-            if not is_lesson_gap_task(task):
+            if not is_lesson_gap_task(candidate):
                 continue
-            if gap_minutes >= 60 and task.duration_minutes > LESSON_GAP_PREFERRED_MAX_MINUTES:
+            if gap_minutes >= 60 and candidate.duration_minutes > LESSON_GAP_PREFERRED_MAX_MINUTES:
                 continue
-        end = slot_start + timedelta(minutes=task.duration_minutes)
-        if violates_time_rule(task, slot_start, end, blocks):
+        end = slot_start + timedelta(minutes=candidate.duration_minutes)
+        if violates_time_rule(candidate, slot_start, end, blocks):
             continue
-        fitting.append(task)
+        fitting.append(candidate)
 
     if not fitting:
         return None
@@ -494,6 +553,84 @@ def choose_task(
             return sorted(mini_or_household, key=lambda task: (task.duration_minutes, task.title))[0]
 
     return sorted(fitting, key=lambda task: task_sort_key(task, slot_start))[0]
+
+
+def clipped_werkstatt_windows(target_day: date, blockers: list[Block]) -> list[TimeWindow]:
+    werkstatt_window = werkstatt_window_for_day(target_day)
+    if werkstatt_window is None:
+        return []
+    windows: list[TimeWindow] = []
+    cursor = werkstatt_window.start
+    for block in merge_overlapping(blockers):
+        start = max(block.start, werkstatt_window.start)
+        end = min(block.end, werkstatt_window.end)
+        if end <= werkstatt_window.start or start >= werkstatt_window.end:
+            continue
+        if start > cursor:
+            windows.append(TimeWindow(cursor, start))
+        cursor = max(cursor, end)
+    if cursor < werkstatt_window.end:
+        windows.append(TimeWindow(cursor, werkstatt_window.end))
+    return [window for window in windows if window.minutes >= WERKSTATT_GAP_MINUTES]
+
+
+def count_matching_werkstatt_tasks(tasks: list[Task], minutes: int) -> tuple[int, bool]:
+    matching = 0
+    duration_miss = False
+    for task in tasks:
+        if task.category != "Werkstatt":
+            continue
+        if task.duration_minutes <= minutes:
+            matching += 1
+        elif task.duration_minutes >= WERKSTATT_GAP_MINUTES and minutes >= WERKSTATT_GAP_MINUTES:
+            matching += 1
+            duration_miss = True
+        else:
+            duration_miss = True
+    return matching, duration_miss
+
+
+def build_workshop_diagnostics(
+    target_day: date,
+    fixed_blocks: list[Block],
+    planned_blocks: list[PlannedBlock],
+    remaining_tasks: list[Task],
+) -> list[str]:
+    diagnostics: list[str] = []
+    hard_windows = clipped_werkstatt_windows(target_day, buffered_planning_blockers(fixed_blocks))
+    if hard_windows:
+        rendered = ", ".join(f"{fmt(window.start)}–{fmt(window.end)} ({window.minutes} Min.)" for window in hard_windows)
+        diagnostics.append(f"Erkannte freie Werkstattfenster: {rendered}.")
+    else:
+        diagnostics.append("Erkannte freie Werkstattfenster: keine Lücke ab 30 Minuten.")
+
+    planned_blockers = [
+        Block(
+            id=f"planned-{index}",
+            title=block.task.title,
+            start=block.start,
+            end=block.end + timedelta(minutes=block.buffer_after_minutes or DEFAULT_BUFFER_MINUTES),
+            source="Auto-Plan",
+            categories=(block.task.category,),
+        )
+        for index, block in enumerate(planned_blocks)
+    ]
+    unused_windows = clipped_werkstatt_windows(target_day, buffered_planning_blockers(fixed_blocks) + planned_blockers)
+    for window in unused_windows:
+        matching, duration_miss = count_matching_werkstatt_tasks(remaining_tasks, window.minutes)
+        if matching:
+            diagnostics.append(
+                f"Nicht genutztes Werkstattfenster {fmt(window.start)}–{fmt(window.end)}: "
+                f"{matching} passende Werkstattaufgabe(n) oder Teilblock möglich; Dauerproblem: {'ja' if duration_miss else 'nein'}."
+            )
+        else:
+            diagnostics.append(
+                f"Lücke {fmt(window.start)}–{fmt(window.end)} frei, aber keine passende Werkstatt-Aufgabe ≤{window.minutes} Min gefunden; "
+                f"Dauerproblem: {'ja' if duration_miss else 'nein'}."
+            )
+    if not unused_windows:
+        diagnostics.append("Nicht genutzte Werkstattfenster: keine ab 30 Minuten.")
+    return diagnostics
 
 
 def rejection_reason(task: Task, blocks: list[Block]) -> str:
@@ -569,10 +706,11 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
                 mini_count += 1
             else:
                 main_count += 1
-            remaining_tasks.remove(task)
+            remaining_tasks.remove(next(original for original in remaining_tasks if original.id == task.id))
             cursor = end + timedelta(minutes=buffer_after or DEFAULT_BUFFER_MINUTES)
 
     not_scheduled = [RejectedTask(task, rejection_reason(task, fixed_blocks)) for task in remaining_tasks]
+    workshop_diagnostics = build_workshop_diagnostics(target_day, fixed_blocks, planned_blocks, remaining_tasks)
 
     return PlanResult(
         target_day=target_day,
@@ -592,6 +730,7 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
         warnings=warnings,
         source_details=source_details,
         calendar_details=calendar_details,
+        workshop_diagnostics=workshop_diagnostics,
     )
 
 
@@ -780,6 +919,10 @@ def render_plan(plan: PlanResult) -> str:
             lines.append(f"- {fmt(block.start)}–{fmt(block.end)} {block.title} ({block.source}{location})")
     else:
         lines.append("- Keine blockierten Zeiten.")
+    lines.append("")
+
+    lines.append("## Werkstattfenster-Diagnose")
+    lines.extend(f"- {detail}" for detail in plan.workshop_diagnostics)
     lines.append("")
 
     lines.append("## Vorgeschlagener Tagesplan")

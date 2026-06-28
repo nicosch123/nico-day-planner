@@ -169,9 +169,12 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             dry_run_plan.load_tasks_for_source = original_load_tasks
             dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
 
-        self.assertEqual(len(plan.planned_blocks), 1)
+        self.assertEqual(len(plan.planned_blocks), 2)
         self.assertEqual(plan.planned_blocks[0].start, datetime(2026, 6, 29, 9, 0))
         self.assertEqual(plan.planned_blocks[0].end, datetime(2026, 6, 29, 10, 30))
+        self.assertEqual(plan.planned_blocks[1].start, datetime(2026, 6, 29, 10, 45))
+        self.assertEqual(plan.planned_blocks[1].end, datetime(2026, 6, 29, 11, 45))
+        self.assertIn("Teil 1", plan.planned_blocks[1].task.title)
 
     def test_validation_requires_buffer_before_manual_event(self) -> None:
         target_day = date(2026, 6, 29)
