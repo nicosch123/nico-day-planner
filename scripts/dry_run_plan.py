@@ -46,6 +46,13 @@ MINI_TASK_MAX_MINUTES = 15
 BUCHHALTUNG_LATEST_END = time(21, 0)
 DEFAULT_CALENDAR_TIME_ZONE = "Europe/Berlin"
 WERKSTATT_DIAGNOSIS_LATEST_END = time(18, 0)
+WERKSTATT_WINDOWS: dict[int, tuple[time, time]] = {
+    0: (time(9, 0), time(17, 0)),
+    1: (time(9, 0), time(14, 0)),
+    2: (time(9, 0), time(14, 0)),
+    3: (time(9, 0), time(12, 0)),
+    4: (time(9, 0), time(17, 0)),
+}
 PRIORITY_ORDER = {"P1": 0, "P2": 1, "P3": 2, "P4": 3}
 
 WEEKLY_STRUCTURE: dict[int, list[dict[str, Any]]] = {
@@ -151,6 +158,7 @@ class PlanResult:
     calendar_write_target_id: str = DEFAULT_CALENDAR_ID
     calendar_created_events: int = 0
     calendar_deleted_events: int = 0
+    validation_errors: list[str] = field(default_factory=list)
 
 
 def parse_hhmm(value: str) -> time:
@@ -288,6 +296,33 @@ def merge_overlapping(blocks: list[Block]) -> list[Block]:
     return sorted(blocks, key=lambda block: (block.start, block.end, block.title))
 
 
+def is_werkstatt_availability_block(block: Block) -> bool:
+    return block.source == "Wochenstruktur" and "Werkstatt" in block.categories
+
+
+def planning_blockers(blocks: list[Block]) -> list[Block]:
+    """Return hard blockers for task placement.
+
+    Weekly Werkstatt entries describe the preferred Werkstatt availability window.
+    They must restrict Werkstatt placement, but should not force Werkstatt tasks into
+    the evening by blocking the whole workshop day. Calendar events and all other
+    fixed weekly structure entries remain hard blockers.
+    """
+    return [block for block in blocks if not is_werkstatt_availability_block(block)]
+
+
+def werkstatt_window_for_day(target_day: date) -> TimeWindow | None:
+    bounds = WERKSTATT_WINDOWS.get(target_day.weekday())
+    if bounds is None:
+        return None
+    start, end = bounds
+    return TimeWindow(datetime.combine(target_day, start), datetime.combine(target_day, end))
+
+
+def overlaps(start: datetime, end: datetime, block_start: datetime, block_end: datetime) -> bool:
+    return start < block_end and end > block_start
+
+
 def find_free_windows(target_day: date, blocks: list[Block]) -> list[TimeWindow]:
     day_start = datetime.combine(target_day, DAY_START)
     day_end = datetime.combine(target_day, DAY_END)
@@ -331,6 +366,14 @@ def in_hour_before_soundwerk(task: Task, start: datetime, end: datetime, blocks:
 
 
 def violates_time_rule(task: Task, start: datetime, end: datetime, blocks: list[Block]) -> str | None:
+    if task.category == "Werkstatt":
+        werkstatt_window = werkstatt_window_for_day(start.date())
+        if werkstatt_window is None or start < werkstatt_window.start or end > werkstatt_window.end:
+            return "Werkstatt-Aufgaben werden nur in der bevorzugten Werkstattzeit geplant."
+    elif werkstatt_window_for_day(start.date()) and overlaps(
+        start, end, werkstatt_window_for_day(start.date()).start, werkstatt_window_for_day(start.date()).end
+    ):
+        return "Nicht-Werkstatt-Aufgaben werden nicht in die bevorzugte Werkstattzeit gestreut."
     if task.category == "Buchhaltung" and end.time() > BUCHHALTUNG_LATEST_END:
         return "Buchhaltung/Admin/Krankenkasse wird nicht nach 21:00 Uhr geplant."
     if is_werkstatt_diagnosis(task) and end.time() > WERKSTATT_DIAGNOSIS_LATEST_END:
@@ -416,7 +459,8 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
     fixed_blocks = calendar_blocks + weekly_blocks(target_day)
     fixed_blocks += travel_blocks(fixed_blocks)
     fixed_blocks = merge_overlapping(fixed_blocks)
-    free_windows = find_free_windows(target_day, fixed_blocks)
+    hard_blockers = planning_blockers(fixed_blocks)
+    free_windows = find_free_windows(target_day, hard_blockers)
     free_minutes = sum(window.minutes for window in free_windows)
     capacity_minutes = int(free_minutes * MAX_PLANNED_PERCENT / 100)
 
@@ -518,6 +562,34 @@ def _calendar_event_body(block: PlannedBlock) -> dict[str, Any]:
     }
 
 
+def validate_planned_blocks(plan: PlanResult) -> list[str]:
+    errors: list[str] = []
+    sorted_planned = sorted(plan.planned_blocks, key=lambda block: (block.start, block.end, block.task.title))
+
+    previous: PlannedBlock | None = None
+    for block in sorted_planned:
+        if block.end <= block.start:
+            errors.append(f"Ungültiger Auto-Block: {render_task(block.task)} {fmt(block.start)}–{fmt(block.end)}.")
+        if previous is not None and block.start < previous.end:
+            errors.append(
+                "Überschneidung zwischen Auto-Blöcken: "
+                f"{render_task(previous.task)} {fmt(previous.start)}–{fmt(previous.end)} und "
+                f"{render_task(block.task)} {fmt(block.start)}–{fmt(block.end)}."
+            )
+        previous = block
+
+    blockers = planning_blockers(plan.fixed_blocks)
+    for planned in sorted_planned:
+        for fixed in blockers:
+            if overlaps(planned.start, planned.end, fixed.start, fixed.end):
+                errors.append(
+                    "Überschneidung mit blockiertem Kalendertermin: "
+                    f"{render_task(planned.task)} {fmt(planned.start)}–{fmt(planned.end)} überschneidet "
+                    f"{fixed.title} {fmt(fixed.start)}–{fmt(fixed.end)} ({fixed.source})."
+                )
+    return errors
+
+
 def apply_calendar_write(plan: PlanResult, write_calendar: bool, replace_auto_events: bool) -> None:
     target_calendar_id = os.environ.get(CALENDAR_ID_ENV_VAR, DEFAULT_CALENDAR_ID)
     plan.calendar_write_target_id = target_calendar_id
@@ -540,6 +612,15 @@ def apply_calendar_write(plan: PlanResult, write_calendar: bool, replace_auto_ev
             "Schreiben blockiert: GOOGLE_CALENDAR_WRITE_ENABLED=true ist nicht gesetzt."
         )
         plan.warnings.append(plan.calendar_write_blocked_warning)
+        return
+
+    plan.validation_errors = validate_planned_blocks(plan)
+    if plan.validation_errors:
+        plan.calendar_write_blocked_warning = (
+            f"Schreiben abgebrochen: Planvalidierung fand {len(plan.validation_errors)} Überschneidung(en)."
+        )
+        plan.warnings.append(plan.calendar_write_blocked_warning)
+        plan.warnings.extend(plan.validation_errors)
         return
 
     plan.calendar_write_enabled = True
@@ -604,6 +685,13 @@ def render_plan(plan: PlanResult) -> str:
     for warning in plan.warnings:
         if warning != plan.calendar_write_blocked_warning:
             lines.append(f"- Warnung: {warning}")
+    lines.append("")
+
+    lines.append("## Planvalidierung")
+    if plan.validation_errors:
+        lines.append(f"- WARNUNG: {len(plan.validation_errors)} Überschneidung(en) erkannt; Kalender-Schreiben wird blockiert.")
+    else:
+        lines.append("- Keine Überschneidungen zwischen Auto-Blöcken oder mit harten Kalenderblockern erkannt.")
     lines.append("")
 
     lines.append("## Blockierte Zeiten")
@@ -684,6 +772,7 @@ def main() -> None:
     args = parse_args()
     target_day = date.fromisoformat(args.date) if args.date else date.today() + timedelta(days=1)
     plan = build_plan(args.source, target_day, args.calendar_source)
+    plan.validation_errors = validate_planned_blocks(plan)
     apply_calendar_write(plan, args.write_calendar, args.replace_auto_events)
     print(render_plan(plan))
 
