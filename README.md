@@ -27,7 +27,7 @@ Version 0.6-calendar bleibt bewusst sicher:
 - `planner_prompt.md`: Prompt-Vorlage für spätere LLM-Planung.
 - `data/example_tasks.json`: Lokale Beispiel-Aufgaben.
 - `data/example_calendar.json`: Lokale Beispiel-Blocker als JSON-Fallback.
-- `scripts/planner.py`: Freundliche Anwendungsschicht-CLI für Preview, Write und Review-Platzhalter.
+- `scripts/planner.py`: Freundliche Anwendungsschicht-CLI für Preview, Write und interaktiven Review von Planner-Auto-Events.
 - `scripts/dry_run_plan.py`: Planer mit JSON-Default, optionalem Todoist-Read-only-Modus und Google-Calendar-Read-only-Quelle.
 - `scripts/todoist_client.py`: Minimaler Todoist-Client mit ausschließlich lesendem `GET /rest/v2/tasks`.
 
@@ -107,7 +107,28 @@ Review für gestern:
 python3 scripts/planner.py review yesterday
 ```
 
-`review` ist in Phase 1 nur ein Platzhalter. Es werden keine Todoist-Aufgaben und keine Google-Calendar-Termine verändert. In Phase 2/3 soll Review geplante Auto-Events auswerten und Feedback erfassen.
+`review` lädt Google Calendar ausschließlich read-only, sucht am Zieltag nach Planner-Auto-Events mit dem Marker `NICO_DAY_PLANNER_AUTO` in der Beschreibung und zeigt sie als kompakte Review-Liste an. Review verändert weder Todoist noch Google Calendar: Es werden keine Todoist-Aufgaben verändert, keine Kalendertermine geschrieben, gelöscht oder aktualisiert und keine manuellen Kalendertermine berührt.
+
+Im interaktiven Modus fragt Review pro gefundenem Planner-Auto-Event Feedback ab:
+
+- Status: `done`, `partial`, `not_done` oder `skipped` über `d/p/n/s`
+- Dauer: `ok`, `too_short`, `too_long` oder `unknown` über `ok/short/long/u`
+- Tageszeit: `good`, `too_late`, `too_early`, `bad` oder `unknown` über `good/late/early/bad/u`
+- optionale Freitext-Notiz
+
+Am Ende wird Tagesfeedback erfasst: Energielevel (`low/normal/high`), Gesamtplan (`too_light/good/too_full`), Abend (`ok/too_full/too_late/not_relevant`) und eine optionale Tagesnotiz. Eine Review-Session wird lokal als JSONL-Zeile gespeichert:
+
+```text
+data/planner_feedback.jsonl
+```
+
+Für Tests oder reine Anzeige gibt es den nicht-interaktiven Modus. Er zeigt gefundene Planner-Auto-Events an, fragt kein Feedback ab und speichert nichts:
+
+```bash
+python3 scripts/planner.py review yesterday --non-interactive
+```
+
+Wenn keine Planner-Auto-Events gefunden werden, endet Review freundlich mit Exit Code 0.
 
 Optionale Phase-1-Parameter werden angezeigt und als Environment Variables an den bestehenden Planner weitergereicht:
 
