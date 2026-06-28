@@ -16,6 +16,7 @@ from dry_run_plan import (  # noqa: E402
     TimeWindow,
     apply_calendar_write,
     build_plan,
+    _calendar_event_body,
     validate_planned_blocks,
 )
 import dry_run_plan  # noqa: E402
@@ -54,6 +55,31 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             calendar_status="test",
         )
         return plan
+
+    def test_calendar_event_body_sets_category_color_ids(self) -> None:
+        start = datetime(2026, 6, 29, 9, 0)
+        end = datetime(2026, 6, 29, 10, 0)
+
+        werkstatt_body = _calendar_event_body(
+            PlannedBlock(Task("todoist-werkstatt", "Kabel löten", "Werkstatt", "P2", 60), start, end)
+        )
+        studio_body = _calendar_event_body(
+            PlannedBlock(Task("todoist-studio", "Feedback prüfen", "Studio", "P1", 60), start, end)
+        )
+
+        self.assertEqual(werkstatt_body["colorId"], "10")
+        self.assertEqual(studio_body["colorId"], "2")
+
+    def test_calendar_event_body_omits_unknown_category_color_id(self) -> None:
+        body = _calendar_event_body(
+            PlannedBlock(
+                Task("todoist-unknown", "Unbekannte Aufgabe", "Unbekannt", "P4", 30),
+                datetime(2026, 6, 29, 9, 0),
+                datetime(2026, 6, 29, 9, 30),
+            )
+        )
+
+        self.assertNotIn("colorId", body)
 
     def test_manual_google_block_collision_fails_validation(self) -> None:
         plan = self._collision_plan()
