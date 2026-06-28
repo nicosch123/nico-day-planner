@@ -54,12 +54,14 @@ WERKSTATT_GAP_MINUTES = 30
 WERKSTATT_PARTIAL_BLOCK_MINUTES = 60
 MAX_PARTIAL_BLOCKS_PER_DAY = 2
 EVENING_START = time(17, 0)
+EVENING_PROTECTED_END = time(19, 30)
 LATE_EVENING_START = time(19, 0)
 LARGE_EVENING_TASK_MINUTES = 60
 MAX_LARGE_EVENING_BLOCKS = 1
 MAX_LATE_EVENING_P4_TASKS = 1
-MAX_EVENING_P4_TASKS_AFTER_LARGE_BLOCK = 1
-MONDAY_EVENING_AUTO_LATEST_END = time(20, 0)
+MAX_LIGHT_TASKS_AFTER_LARGE_EVENING_BLOCK = 1
+MONDAY_EVENING_AUTO_LATEST_END = time(21, 0)
+HOMECOMING_BLOCK_TITLE = "Heimfahrt / Essen / Duschen / Pause"
 WERKSTATT_SMALL_KEYWORDS = (
     "diagnose vorbereiten",
     "fehler provozieren",
@@ -312,6 +314,26 @@ def lunch_break_block(target_day: date) -> Block:
     )
 
 
+def needs_homecoming_evening_pause(blocks: list[Block]) -> bool:
+    return any(
+        block.source == "Wochenstruktur"
+        and (("Werkstatt" in block.categories and block.location == "Mengen") or "Soundwerk" in block.categories)
+        for block in blocks
+    )
+
+
+def homecoming_evening_pause_block(target_day: date) -> Block:
+    return Block(
+        id="daily-homecoming-evening-pause",
+        title=HOMECOMING_BLOCK_TITLE,
+        start=datetime.combine(target_day, EVENING_START),
+        end=datetime.combine(target_day, EVENING_PROTECTED_END),
+        source="Tagesregel",
+        categories=("Pause",),
+        location="Zuhause",
+    )
+
+
 def travel_blocks(blocks: list[Block]) -> list[Block]:
     sorted_blocks = sorted([block for block in blocks if block.location], key=lambda block: block.start)
     travel: list[Block] = []
@@ -511,23 +533,27 @@ def violates_evening_load_rule(
     large_evening_count: int,
     has_full_workshop_day: bool,
     late_evening_p4_count: int = 0,
-    evening_p4_after_large_count: int = 0,
+    light_after_large_evening_count: int = 0,
 ) -> str | None:
     if start.time() < EVENING_START:
         return None
+    if has_full_workshop_day and start.time() < EVENING_PROTECTED_END:
+        if task.duration_minutes > MINI_TASK_MAX_MINUTES or task.category in {"Studio", "ALEGRA"}:
+            return "durch Heimkehr-/Abendpause blockiert"
     if task.priority == "P4" and start.time() >= LATE_EVENING_START and late_evening_p4_count >= MAX_LATE_EVENING_P4_TASKS:
         return "Abendlast begrenzt: nach 19:00 maximal eine kleine P4-Aufgabe automatisch."
-    if task.priority == "P4" and large_evening_count >= MAX_LARGE_EVENING_BLOCKS and evening_p4_after_large_count >= MAX_EVENING_P4_TASKS_AFTER_LARGE_BLOCK:
-        return "Abendlast begrenzt: nach einem großen Fokusblock nur noch höchstens eine kleine P4-Aufgabe."
+    if large_evening_count >= MAX_LARGE_EVENING_BLOCKS and not is_large_evening_task(task, start):
+        if task.duration_minutes > 30 or not is_evening_light_task(task) or light_after_large_evening_count >= MAX_LIGHT_TASKS_AFTER_LARGE_EVENING_BLOCK:
+            return "Abend-Fokuslimit erreicht"
     if is_large_evening_task(task, start):
-        if large_evening_count >= MAX_LARGE_EVENING_BLOCKS and task.priority != "P1":
-            return "Abendlast begrenzt: maximal ein großer Fokusblock nach 17:00."
+        if large_evening_count >= MAX_LARGE_EVENING_BLOCKS:
+            return "Abend-Fokuslimit erreicht"
         if start.time() >= LATE_EVENING_START and task.category in {"Studio", "ALEGRA"} and task.priority not in {"P1", "P2"}:
             return "Lange Studio/ALEGRA-Aufgaben nach 19:00 nur bei hoher Priorität."
         if start.weekday() == 0 and has_full_workshop_day and task.category in {"Studio", "ALEGRA"} and end.time() > MONDAY_EVENING_AUTO_LATEST_END:
-            return "Montagabend nach Werkstatt/Unterricht wird zurückhaltend geplant."
-    if has_full_workshop_day and not is_evening_light_task(task) and large_evening_count >= MAX_LARGE_EVENING_BLOCKS and task.priority != "P1":
-        return "Nach vollem Werkstatt-/Unterrichtstag bevorzugt der Abend kleine Aufgaben."
+            return "Tageslast zu hoch"
+    if has_full_workshop_day and not is_evening_light_task(task) and large_evening_count >= MAX_LARGE_EVENING_BLOCKS:
+        return "Tageslast zu hoch"
     return None
 
 
@@ -560,7 +586,7 @@ def choose_task(
     partial_count: int,
     has_full_workshop_day: bool,
     late_evening_p4_count: int,
-    evening_p4_after_large_count: int,
+    light_after_large_evening_count: int,
 ) -> Task | None:
     fitting: list[Task] = []
     gap_minutes = int((slot_end - slot_start).total_seconds() // 60)
@@ -609,7 +635,7 @@ def choose_task(
             large_evening_count,
             has_full_workshop_day,
             late_evening_p4_count,
-            evening_p4_after_large_count,
+            light_after_large_evening_count,
         ):
             continue
         fitting.append(candidate)
@@ -720,7 +746,7 @@ def build_load_diagnostics(
             "Tageslast-Regel aktiv: voller Werkstatt-/Unterrichtstag erkannt; der Abend wird zurückhaltend geplant."
         )
     diagnostics.append(
-        f"Große Abendblöcke nach 17:00: {large_evening_count}/{MAX_LARGE_EVENING_BLOCKS} automatisch eingeplant."
+        f"Große Abendblöcke nach 19:30: {large_evening_count}/{MAX_LARGE_EVENING_BLOCKS} automatisch eingeplant."
     )
     diagnostics.append(f"Teilblock-Limit: {partial_count}/{MAX_PARTIAL_BLOCKS_PER_DAY} Teilblock(en) genutzt.")
     if partial_count >= MAX_PARTIAL_BLOCKS_PER_DAY:
@@ -734,7 +760,7 @@ def build_load_diagnostics(
     if deferred_evening_tasks and (has_full_workshop_day or large_evening_count >= MAX_LARGE_EVENING_BLOCKS):
         rendered = "; ".join(render_task(task) for task in deferred_evening_tasks[:5])
         suffix = " ..." if len(deferred_evening_tasks) > 5 else ""
-        diagnostics.append(f"Abendaufgaben wegen Tageslast zurückgestellt: {rendered}{suffix}")
+        diagnostics.append(f"Abendaufgaben wegen Tageslast/Abend-Fokuslimit zurückgestellt: {rendered}{suffix}")
 
     skipped_p4 = [task for task in remaining_tasks if task.priority == "P4"]
     if skipped_p4 and (has_full_workshop_day or large_evening_count >= MAX_LARGE_EVENING_BLOCKS):
@@ -755,6 +781,11 @@ def build_load_diagnostics(
 
 
 def rejection_reason(task: Task, blocks: list[Block]) -> str:
+    has_homecoming_pause = any(block.id == "daily-homecoming-evening-pause" for block in blocks)
+    if has_homecoming_pause and task.category in {"Studio", "ALEGRA"} and task.duration_minutes >= LARGE_EVENING_TASK_MINUTES:
+        return "Abend-Fokuslimit erreicht oder Tageslast zu hoch."
+    if has_homecoming_pause and task.duration_minutes > MINI_TASK_MAX_MINUTES and task.category in {"Privat", "Haushalt", "Buchhaltung"}:
+        return "durch Heimkehr-/Abendpause blockiert oder Tageslast zu hoch."
     if task.priority in {"P1", "P2"}:
         return "Höhere Priorität blieb offen: passte nicht mehr in passende 15–45-Minuten-Lücken, Werkstattfenster, Kapazitätslimit oder Aufgabenlimit."
     if task.duration_minutes > LONG_TASK_THRESHOLD_MINUTES:
@@ -786,7 +817,10 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
         calendar_source, target_day
     )
     warnings.extend(calendar_warnings)
-    fixed_blocks = calendar_blocks + weekly_blocks(target_day) + [lunch_break_block(target_day)]
+    weekly = weekly_blocks(target_day)
+    fixed_blocks = calendar_blocks + weekly + [lunch_break_block(target_day)]
+    if needs_homecoming_evening_pause(weekly):
+        fixed_blocks.append(homecoming_evening_pause_block(target_day))
     fixed_blocks += travel_blocks(fixed_blocks)
     fixed_blocks = merge_overlapping(fixed_blocks)
     hard_blockers = buffered_planning_blockers(fixed_blocks)
@@ -807,7 +841,7 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
     mini_count = 0
     large_evening_count = 0
     late_evening_p4_count = 0
-    evening_p4_after_large_count = 0
+    light_after_large_evening_count = 0
     partial_count = 0
     has_full_workshop_day = any(
         is_werkstatt_availability_block(block) and block.start.time() <= time(9, 0) and block.end.time() >= time(17, 0)
@@ -829,7 +863,7 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
                 partial_count,
                 has_full_workshop_day,
                 late_evening_p4_count,
-                evening_p4_after_large_count,
+                light_after_large_evening_count,
             )
             if task is None:
                 werkstatt_window = werkstatt_window_for_day(target_day)
@@ -856,8 +890,13 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
                 had_large_evening_before_task = True
             if task.priority == "P4" and cursor.time() >= LATE_EVENING_START:
                 late_evening_p4_count += 1
-            if task.priority == "P4" and cursor.time() >= EVENING_START and had_large_evening_before_task:
-                evening_p4_after_large_count += 1
+            if (
+                cursor.time() >= EVENING_START
+                and had_large_evening_before_task
+                and not is_large_evening_task(task, cursor)
+                and is_evening_light_task(task)
+            ):
+                light_after_large_evening_count += 1
             if "Teilblock:" in task.notes:
                 partial_count += 1
             remaining_tasks.remove(next(original for original in remaining_tasks if original.id == task.id))
