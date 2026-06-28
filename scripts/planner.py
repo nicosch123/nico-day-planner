@@ -349,6 +349,57 @@ def week_task_buckets(tasks: list[Task]) -> dict[str, list[Task]]:
     return buckets
 
 
+def week_priority_rank(task: Task) -> tuple[int, int, str]:
+    return (0 if task.priority == "P1" else 1 if task.priority == "P2" else 2 if task.priority == "P3" else 3, task.duration_minutes, task.title)
+
+
+def available_week_tasks(buckets: dict[str, list[Task]], category: str, used_task_ids: set[str]) -> list[Task]:
+    if category == "Studio/ALEGRA":
+        tasks = buckets.get("ALEGRA", []) + buckets.get("Studio", [])
+        return sorted((task for task in tasks if task.id not in used_task_ids), key=week_priority_rank)
+    return [task for task in buckets.get(category, []) if task.id not in used_task_ids]
+
+
+def task_short_name(task: Task) -> str:
+    title = task.title
+    for separator in (":", "–"):
+        title = title.split(separator)[0]
+    return title.strip()
+
+
+def mini_communication_tasks(tasks: list[Task], used_task_ids: set[str]) -> list[Task]:
+    communication_categories = {"Studio", "ALEGRA", "Buchhaltung"}
+    return sorted(
+        (
+            task
+            for task in tasks
+            if task.id not in used_task_ids
+            and task.priority in {"P1", "P2"}
+            and 15 <= task.duration_minutes <= 30
+            and task.category in communication_categories
+        ),
+        key=week_priority_rank,
+    )
+
+
+def communication_label(tasks: list[Task]) -> str:
+    categories = {task.category for task in tasks}
+    if categories <= {"Studio"}:
+        prefix = "Studio-Kommunikation"
+    elif categories <= {"ALEGRA"}:
+        prefix = "ALEGRA-Kommunikation"
+    elif categories <= {"Buchhaltung"}:
+        prefix = "Admin/Buchhaltung kurz"
+    else:
+        prefix = "Kommunikation/Admin"
+    names = " / ".join(task_short_name(task) for task in tasks[:4])
+    return f"{prefix}: {names}"
+
+
+def block_as_fixed(block: PlannedBlock) -> Block:
+    return Block(block.task.id, block.task.title, block.start, block.end, "Wochenplan", (block.task.category,))
+
+
 def fixed_blocks_for_week_day(target_day: date) -> tuple[list[Block], list[str]]:
     calendar_blocks, _status, _fallback, warnings, _details, _auto = load_calendar_blocks_for_source("google", target_day)
     fixed = calendar_blocks + weekly_blocks(target_day) + [lunch_break_block(target_day)]
@@ -373,14 +424,46 @@ def first_open_slot(target_day: date, blocks: list[Block], start_hhmm: str, end_
     return None
 
 
+def first_week_structure_slot(target_day: date, blocks: list[Block], category: str, start_hhmm: str, end_hhmm: str, minutes: int) -> tuple[datetime, datetime] | None:
+    category_terms = {
+        "Werkstatt": ("werkstatt",),
+        "Studio": ("studio",),
+        "ALEGRA": ("alegra", "producing", "studio"),
+        "Studio/ALEGRA": ("alegra", "producing", "studio"),
+        "Soundwerk": ("soundwerk", "unterricht"),
+        "Buchhaltung": ("admin", "buchhaltung", "rechnungen"),
+    }.get(category, (category.lower(),))
+    window_start = datetime.combine(target_day, datetime.strptime(start_hhmm, "%H:%M").time())
+    window_end = datetime.combine(target_day, datetime.strptime(end_hhmm, "%H:%M").time())
+    for block in blocks:
+        if block.source != "Wochenstruktur":
+            continue
+        title = block.title.lower()
+        if not any(term in title for term in category_terms):
+            continue
+        start = max(block.start, window_start)
+        end = min(block.end, window_end)
+        if int((end - start).total_seconds() // 60) >= minutes:
+            return start, start + timedelta(minutes=minutes)
+    return None
+
+
+def first_week_slot(target_day: date, blocks: list[Block], category: str, start_hhmm: str, end_hhmm: str, minutes: int) -> tuple[datetime, datetime] | None:
+    return first_open_slot(target_day, blocks, start_hhmm, end_hhmm, minutes) or first_week_structure_slot(
+        target_day, blocks, category, start_hhmm, end_hhmm, minutes
+    )
+
+
 def category_label(category: str, tasks: list[Task]) -> str:
     if category == "Werkstatt":
         names = [task.title.split(":")[0].split("–")[0] for task in tasks[:2]]
         return "Werkstatt-Fokus" + (": " + " / ".join(names) if names else ": offene Reparaturen")
-    if category in {"Studio", "ALEGRA"}:
-        return "Studio/ALEGRA-Fokus"
+    if category in {"Studio", "ALEGRA", "Studio/ALEGRA"}:
+        names = [task_short_name(task) for task in tasks[:3]]
+        return "Studio/ALEGRA-Fokus" + (": " + " / ".join(names) if names else "")
     if category == "Buchhaltung":
-        return "Admin/Buchhaltung"
+        names = [task_short_name(task) for task in tasks[:2]]
+        return "Admin/Buchhaltung" + (": " + " / ".join(names) if names else "")
     if category == "Soundwerk":
         return "Soundwerk/Unterrichtsvorbereitung"
     if category == "Haushalt":
@@ -389,7 +472,8 @@ def category_label(category: str, tasks: list[Task]) -> str:
 
 
 def make_week_block(target_day: date, category: str, title: str, start: datetime, end: datetime) -> PlannedBlock:
-    return PlannedBlock(Task(f"week-{target_day.isoformat()}-{category}-{fmt_week_time(start)}", title, category, "P2", int((end-start).total_seconds()//60)), start, end)
+    task_category = "ALEGRA" if category == "Studio/ALEGRA" else category
+    return PlannedBlock(Task(f"week-{target_day.isoformat()}-{category}-{fmt_week_time(start)}", title, task_category, "P2", int((end-start).total_seconds()//60)), start, end)
 
 
 def build_week_plan(start_day: date, days: int) -> dict[str, Any]:
@@ -408,7 +492,7 @@ def build_week_plan(start_day: date, days: int) -> dict[str, Any]:
             0: [("Werkstatt", "09:00", "12:00", 120), ("Werkstatt", "13:00", "16:00", 120)],
             1: [("Werkstatt", "09:00", "12:00", 120), ("Soundwerk", "13:00", "14:00", 60)],
             2: [("Werkstatt", "09:00", "12:00", 120), ("Soundwerk", "13:00", "14:00", 60)],
-            3: [("Werkstatt", "09:00", "12:00", 90), ("ALEGRA", "14:00", "18:00", 180), ("Studio", "20:00", "23:00", 120)],
+            3: [("Werkstatt", "09:00", "12:00", 180), ("Studio/ALEGRA", "14:00", "17:00", 180)],
             4: [("Werkstatt", "09:00", "12:00", 120), ("Buchhaltung", "13:00", "16:00", 90)],
             5: [("Privat", "10:00", "13:00", 90)],
             6: [("Haushalt", "10:00", "13:00", 90), ("Buchhaltung", "15:00", "18:00", 60)],
@@ -416,22 +500,66 @@ def build_week_plan(start_day: date, days: int) -> dict[str, Any]:
         for category, start_h, end_h, minutes in templates:
             if len(blocks) >= 3:
                 break
-            if not buckets.get(category):
+            category_tasks = available_week_tasks(buckets, category, used_task_ids)
+            if not category_tasks:
                 continue
-            slot = first_open_slot(day, fixed + [Block(b.task.id, b.task.title, b.start, b.end, "Wochenplan", (b.task.category,)) for b in blocks], start_h, end_h, minutes)
+            slot = first_week_slot(day, fixed + [block_as_fixed(b) for b in blocks], category, start_h, end_h, minutes)
             if not slot:
                 continue
-            category_tasks = [task for task in buckets[category] if task.id not in used_task_ids]
             title = category_label(category, category_tasks)
             block = make_week_block(day, category, title, slot[0], slot[1])
             blocks.append(block)
             for task in category_tasks[:3]:
                 used_task_ids.add(task.id)
+        if len(blocks) < 3:
+            mini_tasks = mini_communication_tasks(tasks, used_task_ids)
+            if mini_tasks:
+                mini_windows = {
+                    0: [("15:00", "16:00")],
+                    1: [("13:00", "14:00"), ("15:30", "16:30")],
+                    2: [("13:00", "14:00"), ("15:30", "16:30")],
+                    3: [("17:00", "18:00")],
+                    4: [("14:30", "16:00")],
+                }.get(day.weekday(), [])
+                for start_h, end_h in mini_windows:
+                    if len(blocks) >= 3 or not mini_tasks:
+                        break
+                    bundled: list[Task] = []
+                    bundled_minutes = 0
+                    for task in mini_tasks:
+                        if bundled_minutes + task.duration_minutes > 60:
+                            continue
+                        bundled.append(task)
+                        bundled_minutes += task.duration_minutes
+                        if bundled_minutes >= 30:
+                            break
+                    if not bundled:
+                        continue
+                    slot_minutes = max(30, bundled_minutes)
+                    slot = first_open_slot(day, fixed + [block_as_fixed(b) for b in blocks], start_h, end_h, slot_minutes)
+                    if not slot:
+                        continue
+                    block = make_week_block(day, "ALEGRA" if any(task.category == "ALEGRA" for task in bundled) else bundled[0].category, communication_label(bundled), slot[0], slot[1])
+                    blocks.append(block)
+                    for task in bundled:
+                        used_task_ids.add(task.id)
+                    mini_tasks = mini_communication_tasks(tasks, used_task_ids)
         planned[day] = blocks
     unscheduled_high = [task for task in open_high if task.id not in used_task_ids]
     week_warnings = list(dict.fromkeys(warnings))
-    if len(unscheduled_high) > 4:
-        week_warnings.append(f"{len(unscheduled_high)} P1/P2-Aufgaben passen voraussichtlich nicht in die Woche.")
+    if unscheduled_high:
+        too_large = [task for task in unscheduled_high if task.duration_minutes >= 90]
+        no_focus = [task for task in unscheduled_high if task.category not in {"Werkstatt", "Studio", "ALEGRA", "Buchhaltung", "Soundwerk", "Privat", "Haushalt"}]
+        day_plan = [task for task in unscheduled_high if task.duration_minutes <= 30]
+        if too_large:
+            week_warnings.append(f"{len(too_large)} P1/P2-Aufgabe(n) bleiben offen: zu groß für verfügbare Wochenblöcke.")
+        if no_focus:
+            week_warnings.append(f"{len(no_focus)} P1/P2-Aufgabe(n) bleiben offen: Kategorie hat diese Woche kein passendes Fokusfenster.")
+        if day_plan:
+            week_warnings.append(f"{len(day_plan)} kleine P1/P2-Aufgabe(n) bewusst für Tagesplanung offen gelassen.")
+        other_open = len(unscheduled_high) - len(set(task.id for task in too_large + no_focus + day_plan))
+        if other_open:
+            week_warnings.append(f"{other_open} P1/P2-Aufgabe(n) passen voraussichtlich nicht in die grobe Woche.")
     if estimated_count > len(tasks) // 2:
         week_warnings.append("Viele Dauern sind geschätzt.")
     if not any(block.task.category == "Buchhaltung" for day_blocks in planned.values() for block in day_blocks) and buckets.get("Buchhaltung"):
