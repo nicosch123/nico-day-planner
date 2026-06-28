@@ -52,6 +52,12 @@ MAX_MINI_TASKS = 2
 MINI_TASK_MAX_MINUTES = 15
 WERKSTATT_GAP_MINUTES = 30
 WERKSTATT_PARTIAL_BLOCK_MINUTES = 60
+MAX_PARTIAL_BLOCKS_PER_DAY = 2
+EVENING_START = time(17, 0)
+LATE_EVENING_START = time(19, 0)
+LARGE_EVENING_TASK_MINUTES = 60
+MAX_LARGE_EVENING_BLOCKS = 1
+MONDAY_EVENING_AUTO_LATEST_END = time(20, 0)
 WERKSTATT_SMALL_KEYWORDS = (
     "diagnose vorbereiten",
     "fehler provozieren",
@@ -180,6 +186,7 @@ class PlanResult:
     calendar_deleted_events: int = 0
     validation_errors: list[str] = field(default_factory=list)
     workshop_diagnostics: list[str] = field(default_factory=list)
+    load_diagnostics: list[str] = field(default_factory=list)
 
 
 def parse_hhmm(value: str) -> time:
@@ -466,6 +473,14 @@ def is_preferred_small_werkstatt_task(task: Task) -> bool:
     return task.category == "Werkstatt" and any(keyword in title for keyword in WERKSTATT_SMALL_KEYWORDS)
 
 
+def is_safely_partial_werkstatt_task(task: Task) -> bool:
+    """Return whether a Werkstatt task is safe to create as a same-day Teilblock."""
+    if task.category != "Werkstatt":
+        return False
+    title = task.title.lower()
+    return any(keyword in title for keyword in WERKSTATT_SMALL_KEYWORDS)
+
+
 def make_werkstatt_partial_task(task: Task, minutes: int) -> Task:
     return Task(
         id=task.id,
@@ -479,7 +494,36 @@ def make_werkstatt_partial_task(task: Task, minutes: int) -> Task:
     )
 
 
-def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int, str]:
+def is_large_evening_task(task: Task, start: datetime) -> bool:
+    return start.time() >= EVENING_START and task.duration_minutes >= LARGE_EVENING_TASK_MINUTES
+
+
+def is_evening_light_task(task: Task) -> bool:
+    return task.category in {"Buchhaltung", "Privat", "Haushalt"} or task.duration_minutes <= 30
+
+
+def violates_evening_load_rule(
+    task: Task,
+    start: datetime,
+    end: datetime,
+    large_evening_count: int,
+    has_full_workshop_day: bool,
+) -> str | None:
+    if start.time() < EVENING_START:
+        return None
+    if is_large_evening_task(task, start):
+        if large_evening_count >= MAX_LARGE_EVENING_BLOCKS and task.priority != "P1":
+            return "Abendlast begrenzt: maximal ein großer Fokusblock nach 17:00."
+        if start.time() >= LATE_EVENING_START and task.category in {"Studio", "ALEGRA"} and task.priority not in {"P1", "P2"}:
+            return "Lange Studio/ALEGRA-Aufgaben nach 19:00 nur bei hoher Priorität."
+        if start.weekday() == 0 and has_full_workshop_day and task.category in {"Studio", "ALEGRA"} and end.time() > MONDAY_EVENING_AUTO_LATEST_END:
+            return "Montagabend nach Werkstatt/Unterricht wird zurückhaltend geplant."
+    if has_full_workshop_day and not is_evening_light_task(task) and large_evening_count >= MAX_LARGE_EVENING_BLOCKS and task.priority != "P1":
+        return "Nach vollem Werkstatt-/Unterrichtstag bevorzugt der Abend kleine Aufgaben."
+    return None
+
+
+def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int, int, str]:
     priority_rank = PRIORITY_ORDER.get(task.priority, 99)
     evening_bonus = 0
     if task.category == "Buchhaltung" and slot_start.time() >= time(18, 0):
@@ -487,7 +531,8 @@ def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int,
     household_penalty = 1 if task.category == "Haushalt" and task.duration_minutes > 15 else 0
     werkstatt_small_bonus = -1 if is_preferred_small_werkstatt_task(task) else 0
     return (
-        priority_rank + evening_bonus + household_penalty + werkstatt_small_bonus,
+        priority_rank + evening_bonus,
+        household_penalty + werkstatt_small_bonus,
         task.duration_minutes,
         1 if task.estimated else 0,
         0 if task.category == "Werkstatt" else 1,
@@ -503,6 +548,9 @@ def choose_task(
     blocks: list[Block],
     main_count: int,
     mini_count: int,
+    large_evening_count: int,
+    partial_count: int,
+    has_full_workshop_day: bool,
 ) -> Task | None:
     fitting: list[Task] = []
     gap_minutes = int((slot_end - slot_start).total_seconds() // 60)
@@ -527,6 +575,8 @@ def choose_task(
                 and task.duration_minutes >= WERKSTATT_GAP_MINUTES
                 and fitting_minutes >= WERKSTATT_GAP_MINUTES
                 and remaining_capacity >= WERKSTATT_GAP_MINUTES
+                and partial_count < MAX_PARTIAL_BLOCKS_PER_DAY
+                and is_safely_partial_werkstatt_task(task)
             ):
                 partial_minutes = min(WERKSTATT_PARTIAL_BLOCK_MINUTES, fitting_minutes, remaining_capacity)
                 if partial_minutes < WERKSTATT_GAP_MINUTES:
@@ -541,6 +591,8 @@ def choose_task(
                 continue
         end = slot_start + timedelta(minutes=candidate.duration_minutes)
         if violates_time_rule(candidate, slot_start, end, blocks):
+            continue
+        if violates_evening_load_rule(candidate, slot_start, end, large_evening_count, has_full_workshop_day):
             continue
         fitting.append(candidate)
 
@@ -633,6 +685,37 @@ def build_workshop_diagnostics(
     return diagnostics
 
 
+def build_load_diagnostics(
+    planned_blocks: list[PlannedBlock],
+    remaining_tasks: list[Task],
+    large_evening_count: int,
+    partial_count: int,
+    has_full_workshop_day: bool,
+) -> list[str]:
+    diagnostics: list[str] = []
+    if has_full_workshop_day:
+        diagnostics.append(
+            "Tageslast-Regel aktiv: voller Werkstatt-/Unterrichtstag erkannt; der Abend wird zurückhaltend geplant."
+        )
+    diagnostics.append(
+        f"Große Abendblöcke nach 17:00: {large_evening_count}/{MAX_LARGE_EVENING_BLOCKS} automatisch eingeplant."
+    )
+    diagnostics.append(f"Teilblock-Limit: {partial_count}/{MAX_PARTIAL_BLOCKS_PER_DAY} Teilblock(en) genutzt.")
+    if partial_count >= MAX_PARTIAL_BLOCKS_PER_DAY:
+        diagnostics.append("Teilblock-Limit erreicht: weitere passende Aufgaben werden nicht als „Teil 1“ eingeplant.")
+
+    deferred_evening_tasks = [
+        task
+        for task in remaining_tasks
+        if task.category in {"Studio", "ALEGRA"} and task.duration_minutes >= LARGE_EVENING_TASK_MINUTES and task.priority != "P1"
+    ]
+    if deferred_evening_tasks and (has_full_workshop_day or large_evening_count >= MAX_LARGE_EVENING_BLOCKS):
+        rendered = "; ".join(render_task(task) for task in deferred_evening_tasks[:5])
+        suffix = " ..." if len(deferred_evening_tasks) > 5 else ""
+        diagnostics.append(f"Abendaufgaben wegen Tageslast zurückgestellt: {rendered}{suffix}")
+    return diagnostics
+
+
 def rejection_reason(task: Task, blocks: list[Block]) -> str:
     if task.duration_minutes > LONG_TASK_THRESHOLD_MINUTES:
         return f"Dauer {task.duration_minutes} Minuten ist über {LONG_TASK_THRESHOLD_MINUTES} Minuten."
@@ -682,6 +765,12 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
     planned_minutes = 0
     main_count = 0
     mini_count = 0
+    large_evening_count = 0
+    partial_count = 0
+    has_full_workshop_day = any(
+        is_werkstatt_availability_block(block) and block.start.time() <= time(9, 0) and block.end.time() >= time(17, 0)
+        for block in fixed_blocks
+    )
 
     for window in free_windows:
         cursor = window.start
@@ -694,8 +783,19 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
                 fixed_blocks,
                 main_count,
                 mini_count,
+                large_evening_count,
+                partial_count,
+                has_full_workshop_day,
             )
             if task is None:
+                werkstatt_window = werkstatt_window_for_day(target_day)
+                if (
+                    werkstatt_window is not None
+                    and cursor < werkstatt_window.end
+                    and window.end > werkstatt_window.end
+                ):
+                    cursor = werkstatt_window.end + timedelta(minutes=DEFAULT_BUFFER_MINUTES)
+                    continue
                 break
 
             end = cursor + timedelta(minutes=task.duration_minutes)
@@ -706,11 +806,16 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
                 mini_count += 1
             else:
                 main_count += 1
+            if is_large_evening_task(task, cursor):
+                large_evening_count += 1
+            if "Teilblock:" in task.notes:
+                partial_count += 1
             remaining_tasks.remove(next(original for original in remaining_tasks if original.id == task.id))
             cursor = end + timedelta(minutes=buffer_after or DEFAULT_BUFFER_MINUTES)
 
     not_scheduled = [RejectedTask(task, rejection_reason(task, fixed_blocks)) for task in remaining_tasks]
     workshop_diagnostics = build_workshop_diagnostics(target_day, fixed_blocks, planned_blocks, remaining_tasks)
+    load_diagnostics = build_load_diagnostics(planned_blocks, remaining_tasks, large_evening_count, partial_count, has_full_workshop_day)
 
     return PlanResult(
         target_day=target_day,
@@ -731,6 +836,7 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
         source_details=source_details,
         calendar_details=calendar_details,
         workshop_diagnostics=workshop_diagnostics,
+        load_diagnostics=load_diagnostics,
     )
 
 
@@ -923,6 +1029,13 @@ def render_plan(plan: PlanResult) -> str:
 
     lines.append("## Werkstattfenster-Diagnose")
     lines.extend(f"- {detail}" for detail in plan.workshop_diagnostics)
+    lines.append("")
+
+    lines.append("## Tageslast- und Abenddiagnose")
+    if plan.load_diagnostics:
+        lines.extend(f"- {detail}" for detail in plan.load_diagnostics)
+    else:
+        lines.append("- Keine zusätzlichen Tageslast-Hinweise.")
     lines.append("")
 
     lines.append("## Vorgeschlagener Tagesplan")
