@@ -27,6 +27,7 @@ Version 0.6-calendar bleibt bewusst sicher:
 - `planner_prompt.md`: Prompt-Vorlage für spätere LLM-Planung.
 - `data/example_tasks.json`: Lokale Beispiel-Aufgaben.
 - `data/example_calendar.json`: Lokale Beispiel-Blocker als JSON-Fallback.
+- `scripts/planner.py`: Freundliche Anwendungsschicht-CLI für Preview, Write und Review-Platzhalter.
 - `scripts/dry_run_plan.py`: Planer mit JSON-Default, optionalem Todoist-Read-only-Modus und Google-Calendar-Read-only-Quelle.
 - `scripts/todoist_client.py`: Minimaler Todoist-Client mit ausschließlich lesendem `GET /rest/v2/tasks`.
 
@@ -75,6 +76,58 @@ python3 scripts/dry_run_plan.py --source todoist --calendar-source google --writ
 Automatisches Ersetzen/Löschen ist zusätzlich nur mit `--replace-auto-events` erlaubt und betrifft ausschließlich Events mit Marker `NICO_DAY_PLANNER_AUTO`.
 
 Ohne `TODOIST_API_TOKEN` wird kein Fehler geworfen; der Planer meldet den fehlenden Token und nutzt lokale JSON-Beispieldaten.
+
+## Anwendungsschicht-CLI
+
+Phase 1 ergänzt eine einfache, freundlichere CLI unter `scripts/planner.py`. Sie verpackt die bestehende sichere Planner-Logik, ohne die Sicherheitsregeln zu lockern.
+
+Preview und Write zeigen am Anfang eine kompakte **Plan Card** vor den ausführlichen Diagnosen. Die Plan Card enthält:
+
+- Status `SCHREIBBAR`, `PRÜFEN` oder `BLOCKIERT`.
+- Einen ersten Planqualitäts-Score von `0.0/10` bis `10.0/10`.
+- Einen Kurzplan mit Zeit, Titel, Kategorie, Priorität und Dauer.
+- Maximal fünf wichtige Warnungen.
+- Maximal fünf offene, aber wichtige P1/P2-Aufgaben mit Kurzgrund.
+
+Die ausführliche Diagnose trennt Zeiten klarer in harte Blocker, Verfügbarkeit/Wochenstruktur und bestehende Planner-Auto-Events. Werkstatt-Verfügbarkeit wie `09:00–17:00 Werkstatt Mengen` wird dadurch nicht mehr als harter Blocker angezeigt.
+
+Preview für morgen:
+
+```bash
+python3 scripts/planner.py preview tomorrow
+```
+
+Das ruft intern den bestehenden Planner mit Todoist read-only und Google Calendar read-only auf:
+
+```bash
+python3 scripts/dry_run_plan.py --source todoist --calendar-source google
+```
+
+Write für morgen:
+
+```bash
+GOOGLE_CALENDAR_WRITE_ENABLED=true python3 scripts/planner.py write tomorrow
+```
+
+Write leitet an den bestehenden Planner mit `--write-calendar --replace-auto-events` weiter. Das Schreiben bleibt weiterhin nur erlaubt, wenn zusätzlich `GOOGLE_CALENDAR_WRITE_ENABLED=true` gesetzt ist. Ohne dieses Environment-Gate blockiert der bestehende Planner den Schreibzugriff weiterhin.
+
+Review für gestern:
+
+```bash
+python3 scripts/planner.py review yesterday
+```
+
+`review` ist in Phase 1 nur ein Platzhalter. Es werden keine Todoist-Aufgaben und keine Google-Calendar-Termine verändert. In Phase 2/3 soll Review geplante Auto-Events auswerten und Feedback erfassen.
+
+Optionale Phase-1-Parameter werden angezeigt und als Environment Variables an den bestehenden Planner weitergereicht:
+
+```bash
+python3 scripts/planner.py preview tomorrow --mode light
+python3 scripts/planner.py preview tomorrow --note "Morgen nur Werkstatt und abends frei"
+python3 scripts/planner.py preview tomorrow --from 09:00 --to 21:00
+```
+
+Unterstützte Modi sind `normal`, `light`, `focus-workshop`, `admin-evening`, `no-evening` und `push`.
 
 ## Planungsregeln in Version 0.6-calendar
 

@@ -202,6 +202,7 @@ class PlanResult:
     warnings: list[str] = field(default_factory=list)
     source_details: tuple[str, ...] = field(default_factory=tuple)
     calendar_details: tuple[str, ...] = field(default_factory=tuple)
+    existing_auto_events: list[Block] = field(default_factory=list)
     calendar_write_enabled: bool = False
     calendar_write_blocked_warning: str = ""
     calendar_write_target_id: str = DEFAULT_CALENDAR_ID
@@ -288,20 +289,27 @@ def normalize_calendar_event(raw: dict[str, Any]) -> Block:
     )
 
 
-def load_calendar_blocks_for_source(calendar_source: str, target_day: date) -> tuple[list[Block], str, bool, list[str], tuple[str, ...]]:
+def load_calendar_blocks_for_source(calendar_source: str, target_day: date) -> tuple[list[Block], str, bool, list[str], tuple[str, ...], list[Block]]:
     warnings: list[str] = []
     if calendar_source == "json":
-        return load_json_calendar_blocks(target_day), "Kalender JSON: lokale Beispieltermine geladen.", False, warnings, ()
+        return load_json_calendar_blocks(target_day), "Kalender JSON: lokale Beispieltermine geladen.", False, warnings, (), []
 
     try:
         result = load_calendar_events_for_date(target_day)
     except GoogleCalendarReadError as exc:
         warnings.append(f"Google Calendar konnte nicht gelesen werden ({exc}) – verwende lokale JSON-Kalenderdaten.")
-        return load_json_calendar_blocks(target_day), warnings[-1], True, warnings, ()
+        return load_json_calendar_blocks(target_day), warnings[-1], True, warnings, (), []
 
     if result.used_fallback:
-        return load_json_calendar_blocks(target_day), result.status, True, warnings, result.status_details
-    return [normalize_calendar_event(event) for event in result.events], result.status, False, warnings, result.status_details
+        return load_json_calendar_blocks(target_day), result.status, True, warnings, result.status_details, []
+    return (
+        [normalize_calendar_event(event) for event in result.events],
+        result.status,
+        False,
+        warnings,
+        result.status_details,
+        [normalize_calendar_event(event) for event in result.auto_events],
+    )
 
 def weekly_blocks(target_day: date) -> list[Block]:
     blocks: list[Block] = []
@@ -832,9 +840,20 @@ def load_tasks_for_source(source: str) -> tuple[list[Task], str, bool, list[str]
 
 def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResult:
     tasks, source_status, fallback_used, warnings, source_details = load_tasks_for_source(source)
-    calendar_blocks, calendar_status, calendar_fallback_used, calendar_warnings, calendar_details = load_calendar_blocks_for_source(
-        calendar_source, target_day
-    )
+    calendar_result = load_calendar_blocks_for_source(calendar_source, target_day)
+    if len(calendar_result) == 5:
+        # Backwards-compatible for tests or integrations monkeypatching the old helper shape.
+        calendar_blocks, calendar_status, calendar_fallback_used, calendar_warnings, calendar_details = calendar_result
+        existing_auto_events = []
+    else:
+        (
+            calendar_blocks,
+            calendar_status,
+            calendar_fallback_used,
+            calendar_warnings,
+            calendar_details,
+            existing_auto_events,
+        ) = calendar_result
     warnings.extend(calendar_warnings)
     weekly = weekly_blocks(target_day)
     fixed_blocks = calendar_blocks + weekly + [lunch_break_block(target_day)]
@@ -943,6 +962,7 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
         warnings=warnings,
         source_details=source_details,
         calendar_details=calendar_details,
+        existing_auto_events=existing_auto_events,
         workshop_diagnostics=workshop_diagnostics,
         load_diagnostics=load_diagnostics,
     )
@@ -1084,10 +1104,164 @@ def render_source_details(source_details: tuple[str, ...]) -> list[str]:
     return [f"- {detail}" for detail in source_details]
 
 
+def is_hard_blocker(block: Block) -> bool:
+    return not is_werkstatt_availability_block(block)
+
+
+def plan_end_time(plan: PlanResult) -> datetime | None:
+    if not plan.planned_blocks:
+        return None
+    return max(block.end for block in plan.planned_blocks)
+
+
+def partial_block_count(plan: PlanResult) -> int:
+    return sum(1 for block in plan.planned_blocks if "Teilblock:" in block.task.notes or "Teil " in block.task.title)
+
+
+def large_evening_block_count(plan: PlanResult) -> int:
+    return sum(
+        1
+        for block in plan.planned_blocks
+        if block.start.time() >= time(19, 30) and block.task.duration_minutes >= LARGE_EVENING_TASK_MINUTES
+    )
+
+
+def important_open_tasks(plan: PlanResult) -> list[RejectedTask]:
+    return [item for item in plan.not_scheduled + plan.split_suggestions if item.task.priority in {"P1", "P2"}]
+
+
+def estimated_planned_count(plan: PlanResult) -> int:
+    return sum(1 for block in plan.planned_blocks if block.task.estimated)
+
+
+def has_block(plan: PlanResult, block_id: str) -> bool:
+    return any(block.id == block_id for block in plan.fixed_blocks)
+
+
+def planned_lower_priority_while_important_open(plan: PlanResult) -> bool:
+    return bool(important_open_tasks(plan)) and any(block.task.priority in {"P3", "P4"} for block in plan.planned_blocks)
+
+
+def plan_quality_assessment(plan: PlanResult) -> tuple[str, float, list[str]]:
+    score = 10.0
+    warnings: list[str] = []
+    overlap_count = len(plan.validation_errors)
+    if overlap_count:
+        score = min(score, 3.0)
+        score -= overlap_count * 1.0
+        warnings.append(f"{overlap_count} Überschneidung(en) erkannt")
+
+    if plan.calendar_write_blocked_warning:
+        warnings.append(plan.calendar_write_blocked_warning)
+
+    partials = partial_block_count(plan)
+    if partials > 2:
+        score -= 0.8
+        warnings.append(f"{partials} Teilblöcke geplant")
+    elif partials:
+        warnings.append(f"{partials} Teilblöcke geplant")
+
+    end_time = plan_end_time(plan)
+    if end_time is not None:
+        if end_time.time() > time(21, 30):
+            score -= 1.0
+        warnings.append(f"Plan endet um {fmt(end_time)}")
+
+    evening_blocks = large_evening_block_count(plan)
+    if evening_blocks > 1:
+        score -= 1.0
+        warnings.append(f"{evening_blocks} große Abendblöcke geplant")
+    elif evening_blocks:
+        warnings.append(f"{evening_blocks} großer Abendblock geplant")
+
+    open_important = important_open_tasks(plan)
+    if open_important:
+        score -= 1.0
+        warnings.append("P1/P2-Aufgaben offen geblieben")
+
+    estimated_count = estimated_planned_count(plan)
+    if estimated_count:
+        if estimated_count >= max(3, len(plan.planned_blocks) // 2 + 1):
+            score -= 0.6
+        warnings.append(f"{estimated_count} von {len(plan.planned_blocks)} geplanten Aufgaben haben geschätzte Dauer")
+
+    if planned_lower_priority_while_important_open(plan):
+        score -= 0.8
+        warnings.append("P3/P4 geplant, während P1/P2 offen bleiben")
+
+    if not has_block(plan, "daily-lunch-break"):
+        score -= 1.5
+        warnings.append("Mittagspause fehlt")
+    if needs_homecoming_evening_pause(plan.fixed_blocks) and not has_block(plan, "daily-homecoming-evening-pause"):
+        score -= 1.5
+        warnings.append("Heimkehrpause fehlt")
+
+    score = max(0.0, min(10.0, score))
+    significant_warnings = [
+        warning
+        for warning in warnings
+        if not warning.startswith("Plan endet um") or (end_time is not None and end_time.time() > time(21, 30))
+    ]
+    if plan.validation_errors:
+        status = "BLOCKIERT"
+    elif significant_warnings:
+        status = "PRÜFEN"
+    else:
+        status = "SCHREIBBAR"
+    return status, round(score, 1), warnings[:5]
+
+
+def render_plan_card(plan: PlanResult) -> list[str]:
+    weekday = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][plan.target_day.weekday()]
+    status, score, warnings = plan_quality_assessment(plan)
+    lines = [
+        "## Plan Card",
+        f"Tagesplan für {weekday}, {plan.target_day.isoformat()}",
+        "",
+        f"Status: {status}",
+        f"Planqualität: {score:.1f}/10",
+        "",
+        "### Kurzplan",
+    ]
+    if plan.planned_blocks:
+        for block in plan.planned_blocks:
+            task = block.task
+            estimated = ", geschätzt" if task.estimated else ""
+            lines.append(
+                f"- {fmt(block.start)}–{fmt(block.end)} {task.title} "
+                f"[{task.category}, {task.priority}, {task.duration_minutes} Min.{estimated}]"
+            )
+    else:
+        lines.append("- Keine Aufgaben automatisch eingeplant.")
+
+    lines.append("")
+    lines.append("### Wichtige Warnungen")
+    if warnings:
+        lines.extend(f"- {warning}" for warning in warnings)
+    else:
+        lines.append("- Keine kritischen Warnungen.")
+
+    lines.append("")
+    lines.append("### Offen, aber wichtig")
+    open_items = important_open_tasks(plan)[:5]
+    if open_items:
+        for item in open_items:
+            task = item.task
+            lines.append(f"- {task.title} [{task.category}, {task.priority}] – {item.reason}")
+    else:
+        lines.append("- Keine offenen P1/P2-Aufgaben in der automatischen Auswahl.")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    return lines
+
+
 def render_plan(plan: PlanResult) -> str:
     lines: list[str] = []
     weekday = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"][plan.target_day.weekday()]
     free_minutes = sum(window.minutes for window in plan.free_windows)
+
+    lines.extend(render_plan_card(plan))
 
     lines.append(f"# Nico Day Planner v0.6-calendar – Dry-Run für {weekday}, {plan.target_day.isoformat()}")
     lines.append("")
@@ -1130,17 +1304,60 @@ def render_plan(plan: PlanResult) -> str:
         lines.append("- Keine Überschneidungen zwischen Auto-Blöcken oder mit harten Kalenderblockern erkannt.")
     lines.append("")
 
-    lines.append("## Blockierte Zeiten")
-    if plan.fixed_blocks:
-        for block in plan.fixed_blocks:
+    hard_blocks = [block for block in plan.fixed_blocks if is_hard_blocker(block)]
+    availability_blocks = [block for block in plan.fixed_blocks if is_werkstatt_availability_block(block)]
+
+    lines.append("## Harte Blocker")
+    if hard_blocks:
+        for block in hard_blocks:
             location = f", {block.location}" if block.location else ""
             lines.append(f"- {fmt(block.start)}–{fmt(block.end)} {block.title} ({block.source}{location})")
     else:
-        lines.append("- Keine blockierten Zeiten.")
+        lines.append("- Keine harten Blocker.")
     lines.append("")
 
-    lines.append("## Werkstattfenster-Diagnose")
+    lines.append("## Verfügbarkeit / Wochenstruktur")
+    if availability_blocks:
+        for block in availability_blocks:
+            location = f", {block.location}" if block.location else ""
+            lines.append(f"- {fmt(block.start)}–{fmt(block.end)} {block.title} ({block.source}{location})")
+    else:
+        lines.append("- Keine Wochenstruktur-Verfügbarkeiten für diesen Tag.")
+    lines.append("")
+
+    lines.append("## Bestehende Planner-Auto-Events")
+    if plan.existing_auto_events:
+        for block in plan.existing_auto_events:
+            lines.append(f"- {fmt(block.start)}–{fmt(block.end)} {block.title} ({block.source}; blockiert Neuplanung nicht)")
+    else:
+        lines.append("- Keine bestehenden Planner-Auto-Events gefunden oder lokale Kalenderquelle aktiv.")
+    lines.append("")
+
+    lines.append("## Werkstatt-Arbeitsfenster")
     lines.extend(f"- {detail}" for detail in plan.workshop_diagnostics)
+    lines.append("")
+
+    lines.append("## Unterrichtslücken / kleine Lücken")
+    small_windows = [window for window in plan.free_windows if window.minutes <= LESSON_GAP_TASK_MAX_MINUTES]
+    if small_windows:
+        for window in small_windows:
+            lines.append(f"- {fmt(window.start)}–{fmt(window.end)} ({window.minutes} Min.)")
+    else:
+        lines.append("- Keine kleinen Unterrichts-/Zwischenlücken erkannt.")
+    lines.append("")
+
+    lines.append("## Nicht genutzte Lücken")
+    used_ranges = [(block.start, block.end) for block in plan.planned_blocks]
+    unused_windows = [
+        window
+        for window in plan.free_windows
+        if not any(overlaps(window.start, window.end, start, end) for start, end in used_ranges)
+    ]
+    if unused_windows:
+        for window in unused_windows:
+            lines.append(f"- {fmt(window.start)}–{fmt(window.end)} ({window.minutes} Min.)")
+    else:
+        lines.append("- Keine komplett ungenutzten freien Fenster.")
     lines.append("")
 
     lines.append("## Tageslast- und Abenddiagnose")

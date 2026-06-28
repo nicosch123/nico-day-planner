@@ -17,6 +17,8 @@ from dry_run_plan import (  # noqa: E402
     apply_calendar_write,
     build_plan,
     _calendar_event_body,
+    plan_quality_assessment,
+    render_plan,
     validate_planned_blocks,
 )
 import dry_run_plan  # noqa: E402
@@ -358,6 +360,32 @@ class PlannerValidationRegressionTest(unittest.TestCase):
 
         partials = [block for block in plan.planned_blocks if "Teilblock:" in block.task.notes]
         self.assertLessEqual(len(partials), 2)
+
+    def test_render_plan_starts_with_plan_card_and_separates_availability(self) -> None:
+        plan = build_plan("json", date(2026, 6, 29), "json")
+        plan.validation_errors = validate_planned_blocks(plan)
+
+        output = render_plan(plan)
+
+        self.assertTrue(output.startswith("## Plan Card"))
+        self.assertIn("Planqualität:", output)
+        self.assertIn("### Kurzplan", output)
+        self.assertIn("### Offen, aber wichtig", output)
+        self.assertIn("## Harte Blocker", output)
+        self.assertIn("## Verfügbarkeit / Wochenstruktur", output)
+        self.assertIn("09:00–17:00 Werkstatt Mengen (Wochenstruktur, Mengen)", output)
+        hard_blocker_section = output.split("## Harte Blocker", 1)[1].split("## Verfügbarkeit / Wochenstruktur", 1)[0]
+        self.assertNotIn("Werkstatt Mengen", hard_blocker_section)
+
+    def test_plan_quality_blocks_validation_errors(self) -> None:
+        plan = self._collision_plan()
+        plan.validation_errors = validate_planned_blocks(plan)
+
+        status, score, warnings = plan_quality_assessment(plan)
+
+        self.assertEqual(status, "BLOCKIERT")
+        self.assertLessEqual(score, 3.0)
+        self.assertTrue(any("Überschneidung" in warning for warning in warnings))
 
 
 if __name__ == "__main__":
