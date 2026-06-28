@@ -22,6 +22,7 @@ from dry_run_plan import (  # noqa: E402
 )
 import dry_run_plan  # noqa: E402
 from google_calendar_client import _event_to_block  # noqa: E402
+import planner  # noqa: E402
 
 
 class PlannerValidationRegressionTest(unittest.TestCase):
@@ -530,6 +531,117 @@ class WeeklyPlannerSafetyTest(unittest.TestCase):
         delete_urls = [url for method, url, _description, _body in seen if method == "DELETE"]
         self.assertEqual(len(delete_urls), 1)
         self.assertIn("/week", delete_urls[0])
+
+    def test_day_write_deletes_only_week_events_for_target_day_before_day_planner(self) -> None:
+        calls: list[tuple[date, str]] = []
+        original_delete = planner.delete_auto_events_for_date
+        original_run = planner.subprocess.run
+        original_gate = planner.os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED")
+
+        def fake_delete(target_day: date, _calendar_id: str, marker: str = "") -> int:
+            calls.append((target_day, marker))
+            return 2
+
+        class Completed:
+            returncode = 0
+
+        try:
+            planner.delete_auto_events_for_date = fake_delete
+            planner.subprocess.run = lambda *_args, **_kwargs: Completed()
+            planner.os.environ["GOOGLE_CALENDAR_WRITE_ENABLED"] = "true"
+            args = type("Args", (), {"command": "write", "mode": "normal", "note": None, "from_time": None, "to_time": None})()
+
+            result = planner.run_existing_planner(args, date(2026, 6, 29))
+        finally:
+            planner.delete_auto_events_for_date = original_delete
+            planner.subprocess.run = original_run
+            if original_gate is None:
+                planner.os.environ.pop("GOOGLE_CALENDAR_WRITE_ENABLED", None)
+            else:
+                planner.os.environ["GOOGLE_CALENDAR_WRITE_ENABLED"] = original_gate
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [(date(2026, 6, 29), "NICO_WEEK_PLANNER_AUTO")])
+
+    def test_week_write_skips_day_with_existing_day_auto_events_and_never_deletes_day_events(self) -> None:
+        original_tasks = planner.load_tasks_for_source
+        original_blocks = planner.fixed_blocks_for_week_day
+        original_delete = planner.delete_auto_events_for_date
+        original_create = planner.create_calendar_event
+        original_gate = planner.os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED")
+        deleted_markers: list[str] = []
+        created: list[str] = []
+
+        def fake_fixed(target_day: date):
+            return [], [], target_day == date(2026, 6, 29)
+
+        try:
+            planner.load_tasks_for_source = lambda _source: (
+                [
+                    Task("w1", "Whammy Thilo", "Werkstatt", "P1", 90),
+                    Task("w2", "Echolette NG51 fertigziehen", "Werkstatt", "P1", 75),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            planner.fixed_blocks_for_week_day = fake_fixed
+            planner.delete_auto_events_for_date = lambda _day, _calendar_id, marker="": deleted_markers.append(marker) or 0
+            planner.create_calendar_event = lambda _calendar_id, body: created.append(str(body["summary"])) or "id"
+            planner.os.environ["GOOGLE_CALENDAR_WRITE_ENABLED"] = "true"
+            args = type("Args", (), {"week_from": "2026-06-29", "week_days": 2, "week_command": "write"})()
+
+            result = planner.run_week(args)
+        finally:
+            planner.load_tasks_for_source = original_tasks
+            planner.fixed_blocks_for_week_day = original_blocks
+            planner.delete_auto_events_for_date = original_delete
+            planner.create_calendar_event = original_create
+            if original_gate is None:
+                planner.os.environ.pop("GOOGLE_CALENDAR_WRITE_ENABLED", None)
+            else:
+                planner.os.environ["GOOGLE_CALENDAR_WRITE_ENABLED"] = original_gate
+
+        self.assertEqual(result, 0)
+        self.assertTrue(deleted_markers)
+        self.assertEqual(set(deleted_markers), {"NICO_WEEK_PLANNER_AUTO"})
+        self.assertTrue(created)
+        self.assertNotIn("Whammy Thilo [Werkstatt P1]", created)
+        self.assertIn("Echolette NG51 fertigziehen [Werkstatt P1]", created)
+
+    def test_week_preview_prefers_concrete_tasks_and_bundles_communication(self) -> None:
+        original_tasks = planner.load_tasks_for_source
+        original_blocks = planner.fixed_blocks_for_week_day
+        try:
+            planner.load_tasks_for_source = lambda _source: (
+                [
+                    Task("w1", "Whammy Thilo", "Werkstatt", "P1", 90),
+                    Task("w2", "Echolette NG51 fertigziehen", "Werkstatt", "P1", 75),
+                    Task("s1", "Anna Song1 Feedback nachfragen", "Studio", "P1", 15),
+                    Task("s2", "Termine für Alisa Klavieraufnahme checken", "Studio", "P1", 15),
+                    Task("a1", "Spotify for Artists Pitch / Canvas / Clips vorbereiten", "ALEGRA", "P1", 60),
+                    Task("a2", "WDT Live Session fertig", "ALEGRA", "P1", 90),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            planner.fixed_blocks_for_week_day = lambda _day: ([], [], False)
+
+            plan = planner.build_week_plan(date(2026, 6, 29), 4)
+        finally:
+            planner.load_tasks_for_source = original_tasks
+            planner.fixed_blocks_for_week_day = original_blocks
+
+        titles = [block.task.title for blocks in plan["planned"].values() for block in blocks]
+        self.assertIn("Whammy Thilo [Werkstatt P1]", titles)
+        self.assertIn("Echolette NG51 fertigziehen [Werkstatt P1]", titles)
+        self.assertIn("Spotify for Artists Pitch / Canvas / Clips vorbereiten [ALEGRA P1]", titles)
+        self.assertIn("WDT Live Session fertig [ALEGRA P1]", titles)
+        self.assertTrue(any(title.startswith("Studio-Kommunikation:") for title in titles))
+        self.assertFalse(any(title.startswith("Werkstatt-Fokus") for title in titles))
 
 
 if __name__ == "__main__":
