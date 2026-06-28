@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 CREDENTIALS_ENV_VAR = "GOOGLE_CALENDAR_CREDENTIALS_JSON"
 CALENDAR_ID_ENV_VAR = "GOOGLE_CALENDAR_ID"
@@ -24,6 +25,7 @@ READ_ONLY_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
 WRITE_SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
 AUTO_EVENT_MARKER = "NICO_DAY_PLANNER_AUTO"
 ABSENCE_ALL_DAY_KEYWORDS = ("urlaub", "frei", "krank", "abwesend", "reise", "block", "nico_block_day")
+DEFAULT_CALENDAR_TIME_ZONE = "Europe/Berlin"
 
 
 @dataclass(frozen=True)
@@ -147,13 +149,13 @@ def _google_calendar_rest_request(
 
 
 def _parse_google_datetime(value: dict[str, str], fallback_date: date, fallback_time: time) -> datetime:
-    """Parse a Google Calendar date/dateTime field into a naive local datetime."""
+    """Parse a Google Calendar date/dateTime field into a naive planner-local datetime."""
     date_time_value = value.get("dateTime")
     if date_time_value:
         normalized = date_time_value.replace("Z", "+00:00")
         parsed = datetime.fromisoformat(normalized)
         if parsed.tzinfo is not None:
-            parsed = parsed.astimezone().replace(tzinfo=None)
+            parsed = parsed.astimezone(ZoneInfo(DEFAULT_CALENDAR_TIME_ZONE)).replace(tzinfo=None)
         return parsed
 
     date_value = value.get("date")
@@ -179,22 +181,14 @@ def _is_google_all_day_event(start_raw: dict[str, str], end_raw: dict[str, str])
     )
 
 
-def _is_practical_full_day_event(start: datetime, end: datetime, target_date: date) -> bool:
-    """Detect timed events that effectively cover the whole target date."""
-    day_start = datetime.combine(target_date, time.min)
-    next_day_start = day_start + timedelta(days=1)
-    practical_day_end = datetime.combine(target_date, time(23, 59))
-    starts_at_day_start = start <= day_start
-    ends_at_day_end = end >= practical_day_end or end >= next_day_start
-    return starts_at_day_start and ends_at_day_end
-
-
 def _event_to_block(event: dict[str, Any], target_date: date) -> tuple[dict[str, Any] | None, str | None]:
     """Map one Google Calendar event to the planner's neutral block schema.
 
-    Transparent events, existing planner-owned auto events, and all-day/reminder-
-    style events are ignored as blockers unless the all-day title clearly
-    indicates absence or an intentional block. The optional note explains why a
+    Transparent events, existing planner-owned auto events, and true Google
+    all-day date/date reminder-style events are ignored as blockers unless the
+    all-day title clearly indicates absence or an intentional block. Timed
+    ``dateTime`` events are always hard blockers unless they are explicitly
+    transparent or planner-owned auto events. The optional note explains why a
     loaded Google event was not returned as a blocking planner block.
     """
     if event.get("status") == "cancelled":
@@ -216,9 +210,7 @@ def _event_to_block(event: dict[str, Any], target_date: date) -> tuple[dict[str,
     if end <= start:
         return None, None
 
-    all_day_style = _is_google_all_day_event(start_raw, end_raw) or _is_practical_full_day_event(
-        start, end, target_date
-    )
+    all_day_style = _is_google_all_day_event(start_raw, end_raw)
     if all_day_style and not _is_absence_all_day_title(title):
         return None, f"Ganztagstermin nicht als Blocker gewertet: {title}."
 
