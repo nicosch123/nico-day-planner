@@ -11,8 +11,9 @@ Version 0.6-calendar bleibt bewusst sicher:
 - Wenn `TODOIST_API_TOKEN` fehlt oder Todoist nicht lesbar ist, fällt der Planer sauber auf JSON zurück.
 - Google Calendar darf über `--calendar-source google` read-only als Kalenderquelle gelesen werden.
 - Google Calendar Write Mode ist nur erlaubt, wenn `--write-calendar` gesetzt ist und zusätzlich `GOOGLE_CALENDAR_WRITE_ENABLED=true` in der Umgebung steht.
-- Ersetzen/Löschen ist nur mit `--replace-auto-events` erlaubt und nur für Events mit Marker `NICO_DAY_PLANNER_AUTO`.
-- Manuelle Kalendertermine und Events ohne Marker `NICO_DAY_PLANNER_AUTO` dürfen nicht gelöscht oder geändert werden.
+- Tagesplan-Ersetzen/Löschen ist nur mit `--replace-auto-events` erlaubt und nur für Events mit Marker `NICO_DAY_PLANNER_AUTO`.
+- Wochenplan-Ersetzen/Löschen betrifft ausschließlich Events mit Marker `NICO_WEEK_PLANNER_AUTO`.
+- Manuelle Kalendertermine, Tagesplan-Events ohne Wochenmarker und Wochenplan-Events ohne Tagesmarker dürfen nicht gegenseitig gelöscht oder geändert werden.
 - Es werden keine Todoist-Aufgaben verändert, abgeschlossen, verschoben oder gelöscht.
 - Es werden keine Todoist-Labels geändert und keine Todoist-Kommentare geschrieben.
 - Es werden keine Secrets ins Repository geschrieben.
@@ -27,7 +28,7 @@ Version 0.6-calendar bleibt bewusst sicher:
 - `planner_prompt.md`: Prompt-Vorlage für spätere LLM-Planung.
 - `data/example_tasks.json`: Lokale Beispiel-Aufgaben.
 - `data/example_calendar.json`: Lokale Beispiel-Blocker als JSON-Fallback.
-- `scripts/planner.py`: Freundliche Anwendungsschicht-CLI für Preview, Write und interaktiven Review von Planner-Auto-Events.
+- `scripts/planner.py`: Freundliche Anwendungsschicht-CLI für Tages-Preview, Tages-Write, Wochenplanung und interaktiven Review von Planner-Auto-Events.
 - `scripts/dry_run_plan.py`: Planer mit JSON-Default, optionalem Todoist-Read-only-Modus und Google-Calendar-Read-only-Quelle.
 - `scripts/todoist_client.py`: Minimaler Todoist-Client mit ausschließlich lesendem `GET /rest/v2/tasks`.
 
@@ -64,6 +65,8 @@ Google-Calendar-Read-only-Lauf:
 export GOOGLE_CALENDAR_CREDENTIALS_JSON='{...}'
 export GOOGLE_CALENDAR_ID="dein-kalender@example.com"
 python3 scripts/dry_run_plan.py --source todoist --calendar-source google
+python3 scripts/planner.py week preview
+GOOGLE_CALENDAR_WRITE_ENABLED=false python3 scripts/planner.py week write
 ```
 
 Google-Calendar-Schreiben bleibt standardmäßig blockiert und ist nur mit beiden Gates erlaubt:
@@ -139,6 +142,43 @@ python3 scripts/planner.py preview tomorrow --from 09:00 --to 21:00
 ```
 
 Unterstützte Modi sind `normal`, `light`, `focus-workshop`, `admin-evening`, `no-evening` und `push`.
+
+## Wochenplanung
+
+Zusätzlich zur unveränderten Tagesplanung gibt es eine grobe Wochenplanung. Die Tagesplanung bleibt die Feinplanung für den Abend davor; die Wochenplanung legt nur größere Fokusblöcke von ca. 60–180 Minuten an und plant maximal 2–3 Blöcke pro Tag.
+
+Wochenvorschau ohne Schreibzugriff:
+
+```bash
+python3 scripts/planner.py week preview
+```
+
+Optional kann ein Startdatum oder eine Tagesanzahl gesetzt werden:
+
+```bash
+python3 scripts/planner.py week preview --from 2026-06-29
+python3 scripts/planner.py week preview --days 7
+```
+
+Wochenplan schreiben:
+
+```bash
+GOOGLE_CALENDAR_WRITE_ENABLED=true python3 scripts/planner.py week write
+```
+
+Sicherheitsregeln der Wochenplanung:
+
+- `week preview` schreibt, löscht und verändert keine Kalendertermine.
+- `week write` schreibt nur, wenn intern der Write-Modus aktiv ist und `GOOGLE_CALENDAR_WRITE_ENABLED=true` gesetzt ist.
+- Wenn `GOOGLE_CALENDAR_WRITE_ENABLED` nicht exakt `true` ist, werden keine Events erstellt, gelöscht oder verändert und es erscheint eine klare Warnung.
+- Wochenplan-Events tragen den eigenen Marker `NICO_WEEK_PLANNER_AUTO`.
+- Tagesplan-Events behalten den Marker `NICO_DAY_PLANNER_AUTO`.
+- Wochenplan-Replace löscht ausschließlich alte Wochenplan-Events mit `NICO_WEEK_PLANNER_AUTO`.
+- Tagesplan-Replace löscht weiterhin ausschließlich Tagesplan-Events mit `NICO_DAY_PLANNER_AUTO`.
+- Manuelle Kalendertermine und fremde Events werden niemals gelöscht oder verändert.
+- Todoist bleibt auch für die Wochenplanung read-only.
+
+Die Wochenplanung nutzt die bekannte Wochenstruktur grob: Werkstattblöcke Montag/Freitag ganztägig und Dienstag/Mittwoch/Donnerstag vormittags, Soundwerk-/Unterrichtsfenster Dienstag/Mittwoch, Studio/ALEGRA besonders Donnerstag sowie leichte Wochenendblöcke nur bei passenden Aufgaben. Bestehende harte Google-Calendar-Blocker, Mittagspausen, Heimkehr-/Abendpausen und Fahrten werden respektiert. Tagesplan-Auto-Events werden beim Lesen als Planner-Events erkannt und nicht als manuelle Blocker behandelt; sie werden von `week write` nicht gelöscht.
 
 ## Planungsregeln in Version 0.6-calendar
 

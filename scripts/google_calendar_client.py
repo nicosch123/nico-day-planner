@@ -24,6 +24,8 @@ DEFAULT_CALENDAR_ID = "primary"
 READ_ONLY_SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
 WRITE_SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
 AUTO_EVENT_MARKER = "NICO_DAY_PLANNER_AUTO"
+WEEK_AUTO_EVENT_MARKER = "NICO_WEEK_PLANNER_AUTO"
+PLANNER_AUTO_EVENT_MARKERS = (AUTO_EVENT_MARKER, WEEK_AUTO_EVENT_MARKER)
 ABSENCE_ALL_DAY_KEYWORDS = ("urlaub", "frei", "krank", "abwesend", "reise", "block", "nico_block_day")
 DEFAULT_CALENDAR_TIME_ZONE = "Europe/Berlin"
 
@@ -315,16 +317,20 @@ def _day_bounds_utc(target_date: date) -> tuple[str, str]:
     return day_start.isoformat().replace("+00:00", "Z"), day_end.isoformat().replace("+00:00", "Z")
 
 
-def _contains_auto_marker(event: dict[str, Any]) -> bool:
+def _contains_auto_marker(event: dict[str, Any], marker: str | None = None) -> bool:
     description = event.get("description")
-    return isinstance(description, str) and AUTO_EVENT_MARKER in description
+    if not isinstance(description, str):
+        return False
+    if marker is not None:
+        return marker in description
+    return any(auto_marker in description for auto_marker in PLANNER_AUTO_EVENT_MARKERS)
 
 
-def delete_auto_events_for_date(target_date: date, calendar_id: str) -> int:
+def delete_auto_events_for_date(target_date: date, calendar_id: str, marker: str = AUTO_EVENT_MARKER) -> int:
     """Delete only planner-owned events for the target date.
 
     The ownership check is intentionally narrow: an event is planner-owned only
-    if its description contains ``NICO_DAY_PLANNER_AUTO``. Events without that
+    if its description contains the requested planner marker. Events without that
     marker are never deleted or changed by this function.
     """
     raw_credentials = os.environ.get(CREDENTIALS_ENV_VAR)
@@ -352,7 +358,7 @@ def delete_auto_events_for_date(target_date: date, calendar_id: str) -> int:
     items = response.get("items", [])
     deleted_count = 0
     for event in items:
-        if not isinstance(event, dict) or not _contains_auto_marker(event):
+        if not isinstance(event, dict) or not _contains_auto_marker(event, marker):
             continue
         event_id = event.get("id")
         if not event_id:

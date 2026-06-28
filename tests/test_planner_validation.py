@@ -491,5 +491,46 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         self.assertIn("Bestehender Auto-Plan", auto_section)
 
 
+class WeeklyPlannerSafetyTest(unittest.TestCase):
+    def test_delete_auto_events_for_date_accepts_separate_week_marker(self) -> None:
+        import google_calendar_client
+
+        seen: list[tuple[str, str, str | None, dict[str, str] | None]] = []
+        original_request = google_calendar_client._google_calendar_rest_request
+        original_credentials = google_calendar_client.os.environ.get(google_calendar_client.CREDENTIALS_ENV_VAR)
+
+        def fake_request(_credentials: dict[str, object], _scopes: tuple[str, ...], method: str, url: str, body: dict[str, str] | None = None) -> dict[str, object]:
+            seen.append((method, url, body.get("description") if body else None, body))
+            if method == "GET":
+                return {
+                    "items": [
+                        {"id": "day", "description": "NICO_DAY_PLANNER_AUTO"},
+                        {"id": "week", "description": "NICO_WEEK_PLANNER_AUTO"},
+                        {"id": "manual", "description": "manual"},
+                    ]
+                }
+            return {}
+
+        try:
+            google_calendar_client.os.environ[google_calendar_client.CREDENTIALS_ENV_VAR] = '{"dummy": true}'
+            google_calendar_client._google_calendar_rest_request = fake_request
+            deleted = google_calendar_client.delete_auto_events_for_date(
+                date(2026, 6, 29),
+                "primary",
+                marker=google_calendar_client.WEEK_AUTO_EVENT_MARKER,
+            )
+        finally:
+            google_calendar_client._google_calendar_rest_request = original_request
+            if original_credentials is None:
+                google_calendar_client.os.environ.pop(google_calendar_client.CREDENTIALS_ENV_VAR, None)
+            else:
+                google_calendar_client.os.environ[google_calendar_client.CREDENTIALS_ENV_VAR] = original_credentials
+
+        self.assertEqual(deleted, 1)
+        delete_urls = [url for method, url, _description, _body in seen if method == "DELETE"]
+        self.assertEqual(len(delete_urls), 1)
+        self.assertIn("/week", delete_urls[0])
+
+
 if __name__ == "__main__":
     unittest.main()
