@@ -56,6 +56,9 @@ SUPPORTED_MODES = (
     "no-evening",
     "push",
 )
+DAY_ENERGY_CHOICES = ("low", "normal", "high")
+DAY_OVERALL_CHOICES = ("too_light", "good", "too_full")
+EVENING_CHOICES = ("ok", "too_full", "too_late", "not_relevant")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DRY_RUN_PLAN = SCRIPT_DIR / "dry_run_plan.py"
@@ -119,6 +122,31 @@ def build_parser() -> argparse.ArgumentParser:
                 "--non-interactive",
                 action="store_true",
                 help="Review: Planner-Auto-Events nur anzeigen, kein Feedback abfragen und nichts speichern.",
+            )
+            day_parser.add_argument(
+                "--day-energy",
+                choices=DAY_ENERGY_CHOICES,
+                help="Review-Tagesfeedback: Energielevel.",
+            )
+            day_parser.add_argument(
+                "--day-overall",
+                choices=DAY_OVERALL_CHOICES,
+                help="Review-Tagesfeedback: Einschätzung des Gesamtplans.",
+            )
+            day_parser.add_argument(
+                "--evening",
+                choices=EVENING_CHOICES,
+                help="Review-Tagesfeedback: Einschätzung des Abends.",
+            )
+            day_parser.add_argument(
+                "--day-note",
+                default="",
+                help="Review-Tagesfeedback: optionale Tagesnotiz.",
+            )
+            day_parser.add_argument(
+                "--quick-day",
+                action="store_true",
+                help="Review: Tagesfeedback per CLI speichern und einzelne Events neutral bewerten.",
             )
 
     week_parser = subparsers.add_parser("week", help="Grobe Wochenplanung anzeigen oder sicher gated schreiben.")
@@ -250,14 +278,40 @@ def print_review_events(auto_events: list[dict[str, Any]]) -> None:
     print("")
 
 
+class ReviewInputUnavailable(RuntimeError):
+    """Raised when an interactive review cannot read feedback input."""
+
+
 def prompt_choice(prompt: str, mapping: dict[str, str], default: str) -> str:
     while True:
-        raw = input(prompt).strip().lower()
+        try:
+            raw = input(prompt).strip().lower()
+        except EOFError:
+            raise ReviewInputUnavailable from None
         if not raw:
             return default
         if raw in mapping:
             return mapping[raw]
         print(f"Ungültige Eingabe. Erlaubt: {', '.join(mapping)} oder Enter für {default}.")
+
+
+def prompt_optional_note(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        raise ReviewInputUnavailable from None
+
+
+def neutral_event_feedback(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event_id": event.get("id"),
+        "title": clean_event_title(event),
+        "category": event_category(event),
+        "start": event.get("start"),
+        "end": event.get("end"),
+        "duration_minutes": event_duration_minutes(event),
+        "feedback": {"status": "unknown", "duration": "unknown", "timing": "unknown", "note": ""},
+    }
 
 
 def collect_event_feedback(event: dict[str, Any], index: int) -> dict[str, Any]:
@@ -277,7 +331,7 @@ def collect_event_feedback(event: dict[str, Any], index: int) -> dict[str, Any]:
         {"good": "good", "late": "too_late", "too_late": "too_late", "early": "too_early", "too_early": "too_early", "bad": "bad", "u": "unknown", "unknown": "unknown"},
         "unknown",
     )
-    note = input("Notiz (optional): ").strip()
+    note = prompt_optional_note("Notiz (optional): ")
     print("")
     return {
         "event_id": event.get("id"),
@@ -295,14 +349,67 @@ def collect_day_feedback() -> dict[str, str]:
     energy = prompt_choice("Energielevel [low/normal/high] (Enter=normal): ", {"low": "low", "normal": "normal", "high": "high"}, "normal")
     overall = prompt_choice("Plan insgesamt [light=too_light/good/full=too_full] (Enter=good): ", {"light": "too_light", "too_light": "too_light", "good": "good", "full": "too_full", "too_full": "too_full"}, "good")
     evening = prompt_choice("Abend [ok/full=too_full/late=too_late/n=not_relevant] (Enter=ok): ", {"ok": "ok", "full": "too_full", "too_full": "too_full", "late": "too_late", "too_late": "too_late", "n": "not_relevant", "not_relevant": "not_relevant"}, "ok")
-    note = input("Tagesnotiz (optional): ").strip()
+    note = prompt_optional_note("Tagesnotiz (optional): ")
     return {"energy_level": energy, "overall_plan": overall, "evening": evening, "note": note}
+
+
+def cli_day_feedback(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        "energy_level": args.day_energy or "normal",
+        "overall_plan": args.day_overall or "good",
+        "evening": args.evening or "ok",
+        "note": args.day_note or "",
+    }
+
+
+def has_cli_day_feedback(args: argparse.Namespace) -> bool:
+    return bool(args.day_energy or args.day_overall or args.evening or args.day_note)
 
 
 def save_review_session(session: dict[str, Any]) -> None:
     FEEDBACK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with FEEDBACK_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(session, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def build_review_session(
+    target_day: date,
+    reviewed_events: list[dict[str, Any]],
+    day_feedback: dict[str, str],
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "date": target_day.isoformat(),
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "source": source,
+        "marker": AUTO_EVENT_MARKER,
+        "events": reviewed_events,
+        "day_feedback": day_feedback,
+    }
+
+
+def save_quick_day_review(args: argparse.Namespace, target_day: date, auto_events: list[dict[str, Any]]) -> None:
+    reviewed_events = [neutral_event_feedback(event) for event in auto_events]
+    day_feedback = cli_day_feedback(args)
+    session = build_review_session(
+        target_day,
+        reviewed_events,
+        day_feedback,
+        "google_calendar_read_only_quick_day",
+    )
+    save_review_session(session)
+    print("Quick-Day-Review gespeichert.")
+    print(f"Datum: {target_day.isoformat()}")
+    print(f"Planner-Auto-Events: {len(auto_events)}")
+    print(
+        "Tagesfeedback: "
+        f"energy={day_feedback['energy_level']}, "
+        f"overall={day_feedback['overall_plan']}, "
+        f"evening={day_feedback['evening']}"
+    )
+    if day_feedback["note"]:
+        print(f"Tagesnotiz: {day_feedback['note']}")
+    print(f"Feedback gespeichert in {FEEDBACK_PATH}.")
 
 
 def run_review(args: argparse.Namespace, target_day: date) -> int:
@@ -326,6 +433,12 @@ def run_review(args: argparse.Namespace, target_day: date) -> int:
     auto_events = sorted(result.auto_events, key=lambda event: str(event.get("start") or ""))
     if not auto_events:
         print("Keine Planner-Auto-Events für diesen Tag gefunden.")
+        if args.non_interactive:
+            print("Nicht-interaktiver Review: kein Feedback abgefragt, nichts gespeichert.")
+            return 0
+        if args.quick_day:
+            save_quick_day_review(args, target_day, auto_events)
+            return 0
         return 0
 
     print_review_events(auto_events)
@@ -333,16 +446,24 @@ def run_review(args: argparse.Namespace, target_day: date) -> int:
         print("Nicht-interaktiver Review: kein Feedback abgefragt, nichts gespeichert.")
         return 0
 
-    reviewed_events = [collect_event_feedback(event, index) for index, event in enumerate(auto_events, start=1)]
-    day_feedback = collect_day_feedback()
-    session = {
-        "date": target_day.isoformat(),
-        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "source": "google_calendar_read_only",
-        "marker": AUTO_EVENT_MARKER,
-        "events": reviewed_events,
-        "day_feedback": day_feedback,
-    }
+    if args.quick_day:
+        save_quick_day_review(args, target_day, auto_events)
+        return 0
+
+    try:
+        reviewed_events = [collect_event_feedback(event, index) for index, event in enumerate(auto_events, start=1)]
+        day_feedback = cli_day_feedback(args) if has_cli_day_feedback(args) else collect_day_feedback()
+    except ReviewInputUnavailable:
+        if has_cli_day_feedback(args):
+            print("")
+            print("Kein interaktives stdin verfügbar; speichere Tagesfeedback im Quick-Day-Modus.")
+            save_quick_day_review(args, target_day, auto_events)
+            return 0
+        print("")
+        print("Keine Eingabe verfügbar; Review abgebrochen und kein Feedback gespeichert.")
+        print("Tipp: Nutze --non-interactive, um Planner-Auto-Events nur anzuzeigen.")
+        return 0
+    session = build_review_session(target_day, reviewed_events, day_feedback, "google_calendar_read_only")
     save_review_session(session)
     print(f"Feedback gespeichert in {FEEDBACK_PATH}.")
     return 0

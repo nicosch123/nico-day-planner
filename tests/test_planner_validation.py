@@ -1,3 +1,4 @@
+import argparse
 import sys
 import unittest
 from datetime import date, datetime, timedelta
@@ -40,6 +41,39 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             "Erlaubte Formate: yesterday, today, tomorrow oder YYYY-MM-DD",
         ):
             planner.target_date_for("29.06.2026")
+
+    def test_quick_day_cli_feedback_defaults_missing_day_values(self) -> None:
+        args = argparse.Namespace(day_energy="low", day_overall=None, evening="ok", day_note="Testnotiz")
+
+        feedback = planner.cli_day_feedback(args)
+
+        self.assertEqual(
+            feedback,
+            {
+                "energy_level": "low",
+                "overall_plan": "good",
+                "evening": "ok",
+                "note": "Testnotiz",
+            },
+        )
+
+    def test_quick_day_neutral_event_feedback_does_not_fake_event_status(self) -> None:
+        event = {
+            "id": "auto-1",
+            "title": "[Werkstatt] Whammy Thilo",
+            "start": "2026-06-29T09:00:00",
+            "end": "2026-06-29T10:00:00",
+        }
+
+        feedback = planner.neutral_event_feedback(event)
+
+        self.assertEqual(feedback["title"], "Whammy Thilo")
+        self.assertEqual(feedback["category"], "Werkstatt")
+        self.assertEqual(feedback["duration_minutes"], 60)
+        self.assertEqual(
+            feedback["feedback"],
+            {"status": "unknown", "duration": "unknown", "timing": "unknown", "note": ""},
+        )
 
     def _collision_plan(self) -> PlanResult:
         target_day = date(2026, 6, 29)
