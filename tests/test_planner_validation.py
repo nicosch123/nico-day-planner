@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,21 @@ import planner  # noqa: E402
 
 
 class PlannerValidationRegressionTest(unittest.TestCase):
+    def test_review_target_date_supports_relative_days_and_iso_dates(self) -> None:
+        today = date.today()
+
+        self.assertEqual(planner.target_date_for("yesterday"), today - timedelta(days=1))
+        self.assertEqual(planner.target_date_for("today"), today)
+        self.assertEqual(planner.target_date_for("tomorrow"), today + timedelta(days=1))
+        self.assertEqual(planner.target_date_for("2026-06-29"), date(2026, 6, 29))
+
+    def test_review_target_date_rejects_invalid_formats_with_help(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "Erlaubte Formate: yesterday, today, tomorrow oder YYYY-MM-DD",
+        ):
+            planner.target_date_for("29.06.2026")
+
     def _collision_plan(self) -> PlanResult:
         target_day = date(2026, 6, 29)
         manual_block = Block(
