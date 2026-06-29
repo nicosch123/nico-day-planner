@@ -61,14 +61,22 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DRY_RUN_PLAN = SCRIPT_DIR / "dry_run_plan.py"
 
 
+DATE_FORMAT_HELP = "Erlaubte Formate: yesterday, today, tomorrow oder YYYY-MM-DD."
+
+
 def target_date_for(value: str) -> date:
-    """Return the concrete target date for a supported relative day."""
+    """Return the concrete target date for a supported relative day or ISO date."""
     today = date.today()
     if value == "tomorrow":
         return today + timedelta(days=1)
+    if value == "today":
+        return today
     if value == "yesterday":
         return today - timedelta(days=1)
-    raise ValueError(f"Unsupported target day: {value}")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"Ungültiger Review-Tag: {value}. {DATE_FORMAT_HELP}") from exc
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,8 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     def add_day_options(day_parser: argparse.ArgumentParser) -> None:
         day_parser.add_argument(
             "day",
-            choices=("tomorrow", "yesterday"),
-            help="Zieltag. preview/write unterstützen tomorrow, review unterstützt yesterday.",
+            help="Zieltag. preview/write unterstützen tomorrow; review unterstützt yesterday, today, tomorrow oder YYYY-MM-DD.",
         )
         day_parser.add_argument(
             "--mode",
@@ -299,6 +306,8 @@ def save_review_session(session: dict[str, Any]) -> None:
 
 
 def run_review(args: argparse.Namespace, target_day: date) -> int:
+    print(f"Review für {target_day.isoformat()}")
+    print("")
     print("Lade Google Calendar read-only für Review ...")
     print("Sicherheit: Review verändert weder Todoist noch Google Calendar.")
     print(f"Auto-Event-Marker: {AUTO_EVENT_MARKER}")
@@ -789,8 +798,11 @@ def validate_command_day_combination(parser: argparse.ArgumentParser, args: argp
         return
     if args.command in {"preview", "write"} and args.day != "tomorrow":
         parser.error("preview/write unterstützen in Phase 1 nur den Zieltag 'tomorrow'.")
-    if args.command == "review" and args.day != "yesterday":
-        parser.error("review unterstützt in Phase 1 nur den Zieltag 'yesterday'.")
+    if args.command == "review":
+        try:
+            target_date_for(args.day)
+        except ValueError as exc:
+            parser.error(str(exc))
 
 
 def main() -> int:
