@@ -142,6 +142,8 @@ class Task:
     estimated: bool = False
     duration_source: str = "estimated"
     notes: str = ""
+    parent_id: str = ""
+    parent_title: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,20 +234,39 @@ def load_json(path: Path) -> Any:
         return json.load(handle)
 
 
+def task_title_with_parent(parent_title: str, child_title: str) -> str:
+    parent = parent_title.strip()
+    child = child_title.strip()
+    if not parent or not child:
+        return child or parent
+    normalized_child = child.casefold()
+    normalized_parent = parent.casefold()
+    if normalized_child == normalized_parent or normalized_child.startswith(f"{normalized_parent}:"):
+        return child
+    return f"{parent}: {child}"
+
+
 def normalize_task(raw: dict[str, Any]) -> Task:
     raw_duration = raw.get("duration_minutes")
     estimated = raw_duration is None or raw.get("duration_source") == "estimated"
     duration = DEFAULT_ESTIMATED_DURATION_MINUTES if raw_duration is None else int(raw_duration)
     duration_source = str(raw.get("duration_source", "estimated" if estimated else "explicit"))
+    parent_id = str(raw.get("parent_id", ""))
+    parent_title = str(raw.get("parent_title", ""))
+    title = str(raw.get("title", "Ohne Titel"))
+    if parent_id and parent_title:
+        title = task_title_with_parent(parent_title, title)
     return Task(
         id=str(raw.get("id", "unknown")),
-        title=str(raw.get("title", "Ohne Titel")),
+        title=title,
         category=str(raw.get("category", "Privat")),
         priority=str(raw.get("priority", "P4")),
         duration_minutes=duration,
         estimated=estimated,
         duration_source=duration_source,
         notes=str(raw.get("notes", "")),
+        parent_id=parent_id,
+        parent_title=parent_title,
     )
 
 
@@ -1049,17 +1070,21 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
 
 def _calendar_event_description(block: PlannedBlock) -> str:
     task = block.task
-    return "\n".join(
-        [
-            AUTO_EVENT_MARKER,
-            "automatisch erstellt vom Nico Day Planner",
-            f"Todoist Task ID: {task.id}",
-            f"Kategorie: {task.category}",
-            f"Priorität: {task.priority}",
-            f"Dauer: {task.duration_minutes} Minuten",
-            f"duration_source: {task.duration_source}",
-        ]
-    )
+    lines = [
+        AUTO_EVENT_MARKER,
+        "automatisch erstellt vom Nico Day Planner",
+        "Ursprung: Todoist",
+        f"Todoist Task ID: {task.id}",
+        f"Kategorie: {task.category}",
+        f"Priorität: {task.priority}",
+        f"Dauer: {task.duration_minutes} Minuten",
+        f"duration_source: {task.duration_source}",
+    ]
+    if task.parent_id:
+        lines.append(f"Parent-Task-ID: {task.parent_id}")
+    if task.parent_title:
+        lines.append(f"Parent-Task-Titel: {task.parent_title}")
+    return "\n".join(lines)
 
 
 def _calendar_event_datetime(value: datetime) -> dict[str, str]:

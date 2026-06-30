@@ -287,6 +287,9 @@ def normalize_todoist_task(
         "duration_minutes": duration_minutes,
         "duration_source": duration_source,
     }
+    parent_id = task.get("parent_id")
+    if parent_id:
+        normalized["parent_id"] = str(parent_id)
     if description:
         normalized["notes"] = str(description)
     if project_name:
@@ -294,6 +297,34 @@ def normalize_todoist_task(
     if section_name:
         normalized["section_name"] = section_name
     return normalized
+
+
+def _format_child_title(parent_title: str, child_title: str) -> str:
+    """Prefix child tasks with their parent title unless already present."""
+    parent = parent_title.strip()
+    child = child_title.strip()
+    if not parent or not child:
+        return child or parent
+    normalized_child = child.casefold()
+    normalized_parent = parent.casefold()
+    if normalized_child == normalized_parent or normalized_child.startswith(f"{normalized_parent}:"):
+        return child
+    return f"{parent}: {child}"
+
+
+def enrich_subtask_titles(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add parent metadata and display titles for Todoist subtasks."""
+    title_by_id = {str(task.get("id", "")): str(task.get("title", "")).strip() for task in tasks}
+    enriched: list[dict[str, Any]] = []
+    for task in tasks:
+        item = dict(task)
+        parent_id = str(item.get("parent_id", "")).strip()
+        parent_title = title_by_id.get(parent_id, "") if parent_id else ""
+        if parent_id and parent_title:
+            item["parent_title"] = parent_title
+            item["title"] = _format_child_title(parent_title, str(item.get("title", "")))
+        enriched.append(item)
+    return enriched
 
 
 def _read_todoist_page(url: str, token: str, cursor: str | None, timeout_seconds: int) -> Any:
@@ -397,7 +428,8 @@ def fetch_open_tasks(
 ) -> list[dict[str, Any]]:
     """Fetch all open Todoist tasks via the official read endpoint only."""
     tasks = _fetch_collection(TODOIST_API_URL, token, timeout_seconds)
-    return [normalize_todoist_task(task, project_map, section_map, label_map) for task in tasks]
+    normalized = [normalize_todoist_task(task, project_map, section_map, label_map) for task in tasks]
+    return enrich_subtask_titles(normalized)
 
 
 def _analysis_details(
