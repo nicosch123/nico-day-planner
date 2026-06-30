@@ -494,6 +494,16 @@ def normalize_week_task_title(title: str) -> str:
     return text
 
 
+def normalize_week_task_title_variants(title: str) -> set[str]:
+    normalized = normalize_week_task_title(title)
+    variants = {normalized} if normalized else set()
+    if ":" in normalized:
+        suffix = normalized.split(":", 1)[1].strip()
+        if suffix:
+            variants.add(suffix)
+    return variants
+
+
 def todoist_id_from_description(description: str) -> str | None:
     match = re.search(r"Todoist[- ]Task[- ]ID\s*:\s*([^\s]+)", description, flags=re.IGNORECASE)
     return match.group(1).strip() if match else None
@@ -508,14 +518,12 @@ def day_auto_covered_keys(auto_events: list[Block]) -> tuple[set[str], set[str]]
         task_id = todoist_id_from_description(event.description)
         if task_id:
             ids.add(task_id)
-        normalized = normalize_week_task_title(event.title)
-        if normalized:
-            titles.add(normalized)
+        titles.update(normalize_week_task_title_variants(event.title))
     return ids, titles
 
 
 def task_is_day_covered(task: Task, covered_ids: set[str], covered_titles: set[str]) -> bool:
-    return task.id in covered_ids or normalize_week_task_title(task.title) in covered_titles
+    return task.id in covered_ids or bool(normalize_week_task_title_variants(task.title) & covered_titles)
 
 def week_task_buckets(tasks: list[Task]) -> dict[str, list[Task]]:
     buckets = {category: [] for category in WEEK_CATEGORIES}
@@ -838,6 +846,10 @@ def week_event_body(block: PlannedBlock) -> dict[str, Any]:
     ]
     if todoist_id:
         description_lines.append(f"Todoist-Task-ID: {todoist_id}")
+    if block.task.parent_id:
+        description_lines.append(f"Parent-Task-ID: {block.task.parent_id}")
+    if block.task.parent_title:
+        description_lines.append(f"Parent-Task-Titel: {block.task.parent_title}")
     body = {
         "summary": block.task.title,
         "description": "\n".join(description_lines),

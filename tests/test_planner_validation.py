@@ -24,6 +24,7 @@ from dry_run_plan import (  # noqa: E402
 import dry_run_plan  # noqa: E402
 from google_calendar_client import _event_to_block  # noqa: E402
 import planner  # noqa: E402
+from todoist_client import enrich_subtask_titles  # noqa: E402
 
 
 class PlannerValidationRegressionTest(unittest.TestCase):
@@ -783,6 +784,64 @@ class WeeklyPlannerSafetyTest(unittest.TestCase):
         ids, titles = planner.day_auto_covered_keys([event])
         self.assertEqual(ids, {"w1"})
         self.assertIn("whammy thilo", titles)
+
+    def test_todoist_subtask_title_gets_parent_prefix(self) -> None:
+        tasks = enrich_subtask_titles(
+            [
+                {"id": "parent-1", "title": "Echolette NG51", "category": "Werkstatt", "priority": "P1", "duration_minutes": 120},
+                {
+                    "id": "child-1",
+                    "parent_id": "parent-1",
+                    "title": "Heizkreis und Spannungsversorgung prüfen",
+                    "category": "Werkstatt",
+                    "priority": "P1",
+                    "duration_minutes": 60,
+                },
+            ]
+        )
+        child = dry_run_plan.normalize_task(tasks[1])
+
+        self.assertEqual(child.title, "Echolette NG51: Heizkreis und Spannungsversorgung prüfen")
+        self.assertEqual(child.parent_id, "parent-1")
+        self.assertEqual(child.parent_title, "Echolette NG51")
+
+    def test_todoist_subtask_title_does_not_double_parent_prefix(self) -> None:
+        tasks = enrich_subtask_titles(
+            [
+                {"id": "parent-1", "title": "Echolette NG51", "category": "Werkstatt", "priority": "P1", "duration_minutes": 120},
+                {
+                    "id": "child-1",
+                    "parent_id": "parent-1",
+                    "title": "Echolette NG51: Heizkreis prüfen",
+                    "category": "Werkstatt",
+                    "priority": "P1",
+                    "duration_minutes": 60,
+                },
+            ]
+        )
+        child = dry_run_plan.normalize_task(tasks[1])
+
+        self.assertEqual(child.title, "Echolette NG51: Heizkreis prüfen")
+
+    def test_day_title_dedupe_matches_parent_prefixed_auto_event(self) -> None:
+        event = Block(
+            "day-1",
+            "[Werkstatt] Echolette NG51: Heizkreis und Spannungsversorgung prüfen",
+            datetime(2026, 6, 29, 9, 0),
+            datetime(2026, 6, 29, 10, 0),
+            "Google Calendar",
+            description="NICO_DAY_PLANNER_AUTO",
+        )
+        _ids, titles = planner.day_auto_covered_keys([event])
+        task = Task(
+            id="child-1",
+            title="Heizkreis und Spannungsversorgung prüfen",
+            category="Werkstatt",
+            priority="P1",
+            duration_minutes=60,
+        )
+
+        self.assertTrue(planner.task_is_day_covered(task, set(), titles))
 
     def test_week_preview_prefers_concrete_tasks_and_bundles_communication(self) -> None:
         original_tasks = planner.load_tasks_for_source
