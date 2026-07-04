@@ -90,6 +90,8 @@ GOOGLE_CALENDAR_CATEGORY_COLORS: dict[str, str] = {
     "Werkstatt": "10",  # Basilikum
     "Studio": "2",  # Salbei
     "ALEGRA": "1",  # Lavendel
+    "Buchhaltung": "7",  # Eukalyptus
+    "Haushalt": "9",  # Pistazie
     "Privat": "7",  # Pfau
     "LIVE": "7",  # Pfau, bis eine eigene Farbe festgelegt ist
     "Soundwerk": "11",  # Tomate
