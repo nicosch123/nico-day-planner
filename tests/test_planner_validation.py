@@ -118,9 +118,17 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         studio_body = _calendar_event_body(
             PlannedBlock(Task("todoist-studio", "Feedback prüfen", "Studio", "P1", 60), start, end)
         )
+        buchhaltung_body = _calendar_event_body(
+            PlannedBlock(Task("todoist-buchhaltung", "Rechnungen prüfen", "Buchhaltung", "P1", 60), start, end)
+        )
+        haushalt_body = _calendar_event_body(
+            PlannedBlock(Task("todoist-haushalt", "Küche aufräumen", "Haushalt", "P3", 30), start, end)
+        )
 
         self.assertEqual(werkstatt_body["colorId"], "10")
         self.assertEqual(studio_body["colorId"], "2")
+        self.assertEqual(buchhaltung_body["colorId"], "7")
+        self.assertEqual(haushalt_body["colorId"], "9")
 
     def test_calendar_event_body_omits_unknown_category_color_id(self) -> None:
         body = _calendar_event_body(
