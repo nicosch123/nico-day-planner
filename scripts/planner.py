@@ -44,6 +44,9 @@ from dry_run_plan import (
     lunch_break_block,
     needs_homecoming_evening_pause,
     homecoming_evening_pause_block,
+    manual_calendar_coverage_titles,
+    task_is_manually_covered_by_titles,
+    normalize_calendar_coverage_title,
     travel_blocks,
 )
 
@@ -488,10 +491,7 @@ def fmt_week_time(value: datetime) -> str:
 
 
 def normalize_week_task_title(title: str) -> str:
-    text = re.sub(r"\[[^\]]+\]", " ", title)
-    text = re.sub(r"\s+[–-]\s+(teil\s*\d+|wochenblock|check)\b", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip().casefold()
-    return text
+    return normalize_calendar_coverage_title(title)
 
 
 def normalize_week_task_title_variants(title: str) -> set[str]:
@@ -523,7 +523,7 @@ def day_auto_covered_keys(auto_events: list[Block]) -> tuple[set[str], set[str]]
 
 
 def task_is_day_covered(task: Task, covered_ids: set[str], covered_titles: set[str]) -> bool:
-    return task.id in covered_ids or bool(normalize_week_task_title_variants(task.title) & covered_titles)
+    return task.id in covered_ids or task_is_manually_covered_by_titles(task, covered_titles)
 
 def week_task_buckets(tasks: list[Task]) -> dict[str, list[Task]]:
     buckets = {category: [] for category in WEEK_CATEGORIES}
@@ -623,6 +623,7 @@ def fixed_blocks_for_week_day(target_day: date) -> tuple[list[Block], list[str],
     fixed += travel_blocks(fixed)
     covered_ids, covered_titles = day_auto_covered_keys(auto_events)
     has_day_plan = bool(covered_ids or covered_titles)
+    covered_titles.update(manual_calendar_coverage_titles(calendar_blocks))
     return merge_overlapping(fixed), warnings, has_day_plan, covered_ids, covered_titles
 
 
@@ -803,7 +804,8 @@ def build_week_plan(start_day: date, days: int) -> dict[str, Any]:
                         used_task_ids.add(task.id)
                     mini_tasks = mini_communication_tasks(tasks, used_task_ids, day_covered_ids, day_covered_titles)
         planned[day] = blocks
-    day_covered_count = sum(1 for task in open_high if task_is_day_covered(task, day_covered_ids, day_covered_titles))
+    covered_high_tasks = [task for task in open_high if task_is_day_covered(task, day_covered_ids, day_covered_titles)]
+    day_covered_count = len(covered_high_tasks)
     unscheduled_high = [task for task in open_high if task.id not in used_task_ids and not task_is_day_covered(task, day_covered_ids, day_covered_titles)]
     week_warnings = list(dict.fromkeys(warnings))
     if unscheduled_high:
@@ -821,6 +823,9 @@ def build_week_plan(start_day: date, days: int) -> dict[str, Any]:
             week_warnings.append(f"{other_open} P1/P2-Aufgabe(n) passen voraussichtlich nicht in die grobe Woche.")
     if day_covered_count:
         week_warnings.append(f"{day_covered_count} Aufgabe(n) bereits durch Tagesplanung abgedeckt.")
+        covered_names = ", ".join(task.title for task in covered_high_tasks[:5])
+        suffix = " ..." if len(covered_high_tasks) > 5 else ""
+        week_warnings.append(f"{day_covered_count} Aufgabe(n) bereits durch Tagesplanung oder manuelle Kalendertermine abgedeckt: {covered_names}{suffix}")
     if skipped_days:
         week_warnings.append(f"{len(skipped_days)} Tag(e) wegen bestehendem Tagesplan übersprungen.")
     if estimated_count > len(tasks) // 2:

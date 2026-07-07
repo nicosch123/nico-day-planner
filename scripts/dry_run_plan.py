@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -217,6 +218,7 @@ class PlanResult:
     workshop_diagnostics: list[str] = field(default_factory=list)
     load_diagnostics: list[str] = field(default_factory=list)
     existing_auto_events: list[Block] = field(default_factory=list)
+    manually_covered_tasks: list[Task] = field(default_factory=list)
 
 
 def parse_hhmm(value: str) -> time:
@@ -313,6 +315,53 @@ def normalize_calendar_event(raw: dict[str, Any]) -> Block:
         location=str(raw.get("location", "")),
         description=str(raw.get("description", "")),
     )
+
+
+def normalize_calendar_coverage_title(title: str) -> str:
+    """Normalize a calendar/task title for cautious manual-coverage matching."""
+    text = title.casefold().strip()
+    text = re.sub(r"\[[^\]]+\]", " ", text)
+    text = re.sub(r"\s+[–-]\s+(teil\s*\d+|wochenblock|check)\b.*$", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"[“”„\"'`´]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def task_coverage_title_variants(task: Task) -> set[str]:
+    """Return safe title variants that may prove a Todoist task is calendar-covered."""
+    variants = {normalize_calendar_coverage_title(task.title)}
+    if task.parent_title:
+        variants.add(normalize_calendar_coverage_title(task_title_with_parent(task.parent_title, task.title)))
+    return {variant for variant in variants if variant}
+
+
+def _is_phrase_match(task_title: str, calendar_title: str) -> bool:
+    """Allow only complete normalized task titles as phrases, never single keywords."""
+    if not task_title or len(task_title.split()) < 2:
+        return False
+    return re.search(rf"(?<!\w){re.escape(task_title)}(?!\w)", calendar_title) is not None
+
+
+def task_is_manually_covered_by_titles(task: Task, calendar_titles: set[str]) -> bool:
+    """Return whether a manual calendar title cautiously covers a Todoist task."""
+    task_titles = task_coverage_title_variants(task)
+    if task_titles & calendar_titles:
+        return True
+    return any(_is_phrase_match(task_title, calendar_title) for task_title in task_titles for calendar_title in calendar_titles)
+
+
+def manual_calendar_coverage_titles(blocks: list[Block]) -> set[str]:
+    """Return normalized titles for manual Google Calendar events only."""
+    titles: set[str] = set()
+    for block in blocks:
+        if block.source != "Google Calendar":
+            continue
+        if any(marker in block.description or marker in block.title for marker in (AUTO_EVENT_MARKER, "NICO_WEEK_PLANNER_AUTO")):
+            continue
+        normalized = normalize_calendar_coverage_title(block.title)
+        if normalized:
+            titles.add(normalized)
+    return titles
 
 
 def load_calendar_blocks_for_source(
@@ -923,6 +972,17 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
             existing_auto_events,
         ) = calendar_result
     warnings.extend(calendar_warnings)
+    manual_coverage_titles = manual_calendar_coverage_titles(calendar_blocks)
+    manually_covered_tasks = [
+        task for task in tasks if task_is_manually_covered_by_titles(task, manual_coverage_titles)
+    ]
+    if manually_covered_tasks:
+        covered_names = ", ".join(task.title for task in manually_covered_tasks[:5])
+        suffix = " ..." if len(manually_covered_tasks) > 5 else ""
+        calendar_details = tuple(calendar_details) + (
+            f"{len(manually_covered_tasks)} Aufgabe(n) durch manuelle Kalendertermine abgedeckt: {covered_names}{suffix}",
+        )
+    tasks = [task for task in tasks if task not in manually_covered_tasks]
     weekly = weekly_blocks(target_day)
     fixed_blocks = calendar_blocks + weekly + [lunch_break_block(target_day)]
     if needs_homecoming_evening_pause(weekly):
@@ -1067,6 +1127,7 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
         workshop_diagnostics=workshop_diagnostics,
         load_diagnostics=load_diagnostics,
         existing_auto_events=existing_auto_events,
+        manually_covered_tasks=manually_covered_tasks,
     )
 
 

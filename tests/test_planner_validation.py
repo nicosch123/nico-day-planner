@@ -851,6 +851,79 @@ class WeeklyPlannerSafetyTest(unittest.TestCase):
 
         self.assertTrue(planner.task_is_day_covered(task, set(), titles))
 
+    def test_day_plan_excludes_task_with_exact_manual_calendar_title(self) -> None:
+        original_tasks = dry_run_plan.load_tasks_for_source
+        original_calendar = dry_run_plan.load_calendar_blocks_for_source
+        target = date(2026, 6, 29)
+        manual = Block("manual-1", "Versicherung Ratenzahlung anfragen", datetime(2026, 6, 29, 10), datetime(2026, 6, 29, 11), "Google Calendar")
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [Task("t1", "Versicherung Ratenzahlung anfragen", "Buchhaltung", "P1", 60)],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: (
+                [manual],
+                "calendar",
+                False,
+                [],
+                (),
+                [],
+            )
+
+            plan = dry_run_plan.build_plan("todoist", target, "google")
+        finally:
+            dry_run_plan.load_tasks_for_source = original_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_calendar
+
+        self.assertEqual([task.title for task in plan.manually_covered_tasks], ["Versicherung Ratenzahlung anfragen"])
+        self.assertFalse(plan.planned_blocks)
+        self.assertFalse(plan.not_scheduled)
+        self.assertFalse(dry_run_plan.important_open_tasks(plan))
+        self.assertIn("1 Aufgabe(n) durch manuelle Kalendertermine abgedeckt", "\n".join(plan.calendar_details))
+
+    def test_manual_parent_prefixed_calendar_title_covers_subtask(self) -> None:
+        titles = {dry_run_plan.normalize_calendar_coverage_title("Echolette NG51: Heizkreis prüfen")}
+        task = Task("child-1", "Heizkreis prüfen", "Werkstatt", "P1", 30, parent_id="parent-1", parent_title="Echolette NG51")
+
+        self.assertTrue(dry_run_plan.task_is_manually_covered_by_titles(task, titles))
+
+    def test_generic_manual_calendar_title_does_not_cover_category_tasks(self) -> None:
+        titles = {dry_run_plan.normalize_calendar_coverage_title("Werkstatt")}
+        task = Task("w1", "Echolette NG51", "Werkstatt", "P1", 60)
+
+        self.assertFalse(dry_run_plan.task_is_manually_covered_by_titles(task, titles))
+
+    def test_week_manual_covered_tasks_omitted_from_bundle_and_open_high(self) -> None:
+        original_tasks = planner.load_tasks_for_source
+        original_blocks = planner.fixed_blocks_for_week_day
+        try:
+            planner.load_tasks_for_source = lambda _source: (
+                [
+                    Task("a1", "Tim Finanzen", "ALEGRA", "P2", 30),
+                    Task("s1", "Anna Song1 Feedback nachfragen", "Studio", "P1", 15),
+                    Task("s2", "Termine für Alisa Klavieraufnahme checken", "Studio", "P1", 15),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            covered_title = planner.normalize_week_task_title("Tim Finanzen")
+            planner.fixed_blocks_for_week_day = lambda _day: ([], [], False, set(), {covered_title})
+
+            plan = planner.build_week_plan(date(2026, 6, 29), 5)
+        finally:
+            planner.load_tasks_for_source = original_tasks
+            planner.fixed_blocks_for_week_day = original_blocks
+
+        titles = [block.task.title for blocks in plan["planned"].values() for block in blocks]
+        self.assertFalse(any("Tim Finanzen" in title for title in titles))
+        self.assertFalse(any(task.title == "Tim Finanzen" for task in plan["open_high"]))
+        self.assertTrue(any("manuelle Kalendertermine abgedeckt" in warning for warning in plan["warnings"]))
+
     def test_week_preview_prefers_concrete_tasks_and_bundles_communication(self) -> None:
         original_tasks = planner.load_tasks_for_source
         original_blocks = planner.fixed_blocks_for_week_day
