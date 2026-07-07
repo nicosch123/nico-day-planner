@@ -222,6 +222,7 @@ def _event_to_block(event: dict[str, Any], target_date: date) -> tuple[dict[str,
         "start": start.isoformat(timespec="seconds"),
         "end": end.isoformat(timespec="seconds"),
         "location": str(event.get("location") or ""),
+        "description": str(event.get("description") or ""),
         "source": "Google Calendar",
     }, None
 
