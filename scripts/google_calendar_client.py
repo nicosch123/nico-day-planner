@@ -327,12 +327,18 @@ def _contains_auto_marker(event: dict[str, Any], marker: str | None = None) -> b
     return any(auto_marker in description for auto_marker in PLANNER_AUTO_EVENT_MARKERS)
 
 
-def delete_auto_events_for_date(target_date: date, calendar_id: str, marker: str = AUTO_EVENT_MARKER) -> int:
+def delete_auto_events_for_date(
+    target_date: date,
+    calendar_id: str,
+    marker: str = AUTO_EVENT_MARKER,
+    not_before: datetime | None = None,
+) -> int:
     """Delete only planner-owned events for the target date.
 
     The ownership check is intentionally narrow: an event is planner-owned only
     if its description contains the requested planner marker. Events without that
-    marker are never deleted or changed by this function.
+    marker are never deleted or changed by this function. When ``not_before`` is
+    set, matching auto-events that started earlier are preserved as history.
     """
     raw_credentials = os.environ.get(CREDENTIALS_ENV_VAR)
     if not raw_credentials:
@@ -361,6 +367,12 @@ def delete_auto_events_for_date(target_date: date, calendar_id: str, marker: str
     for event in items:
         if not isinstance(event, dict) or not _contains_auto_marker(event, marker):
             continue
+        if not_before is not None:
+            start_raw = event.get("start")
+            if isinstance(start_raw, dict):
+                event_start = _parse_google_datetime(start_raw, target_date, time(0, 0))
+                if event_start < not_before:
+                    continue
         event_id = event.get("id")
         if not event_id:
             continue
