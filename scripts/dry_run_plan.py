@@ -188,6 +188,13 @@ class RejectedTask:
     reason: str
 
 
+@dataclass(frozen=True)
+class PlanOptions:
+    day_end: time = DAY_END
+    allow_late: bool = False
+    admin_until: time | None = None
+
+
 @dataclass
 class PlanResult:
     target_day: date
@@ -218,6 +225,8 @@ class PlanResult:
     existing_auto_events: list[Block] = field(default_factory=list)
     manually_covered_tasks: list[Task] = field(default_factory=list)
     planning_start: datetime | None = None
+    plan_options: PlanOptions = field(default_factory=PlanOptions)
+    open_task_context: tuple[str, ...] = field(default_factory=tuple)
 
 
 def parse_hhmm(value: str) -> time:
@@ -509,11 +518,11 @@ def overlaps(start: datetime, end: datetime, block_start: datetime, block_end: d
     return start < block_end and end > block_start
 
 
-def find_free_windows(target_day: date, blocks: list[Block], planning_start: datetime | None = None) -> list[TimeWindow]:
+def find_free_windows(target_day: date, blocks: list[Block], planning_start: datetime | None = None, day_end_time: time = DAY_END) -> list[TimeWindow]:
     day_start = datetime.combine(target_day, DAY_START)
     if planning_start is not None and planning_start.date() == target_day:
         day_start = max(day_start, planning_start)
-    day_end = datetime.combine(target_day, DAY_END)
+    day_end = datetime.combine(target_day, day_end_time)
     cursor = day_start
     windows: list[TimeWindow] = []
 
@@ -581,7 +590,8 @@ def in_hour_before_soundwerk(task: Task, start: datetime, end: datetime, blocks:
     return False
 
 
-def violates_time_rule(task: Task, start: datetime, end: datetime, blocks: list[Block]) -> str | None:
+def violates_time_rule(task: Task, start: datetime, end: datetime, blocks: list[Block], options: PlanOptions | None = None) -> str | None:
+    options = options or PlanOptions()
     if task.category == "Werkstatt":
         werkstatt_window = werkstatt_window_for_day(start.date())
         if werkstatt_window is None or start < werkstatt_window.start or end > werkstatt_window.end:
@@ -592,8 +602,9 @@ def violates_time_rule(task: Task, start: datetime, end: datetime, blocks: list[
         and not (is_lesson_gap(start, end, blocks) and is_lesson_gap_task(task))
     ):
         return "Nicht-Werkstatt-Aufgaben werden nicht in die bevorzugte Werkstattzeit gestreut."
-    if task.category == "Buchhaltung" and end.time() > BUCHHALTUNG_LATEST_END:
-        return "Buchhaltung/Admin/Krankenkasse wird nicht nach 21:00 Uhr geplant."
+    admin_latest_end = options.admin_until or (options.day_end if options.allow_late else BUCHHALTUNG_LATEST_END)
+    if task.category == "Buchhaltung" and end.time() > admin_latest_end:
+        return f"Buchhaltung/Admin/Krankenkasse wird nicht nach {admin_latest_end:%H:%M} Uhr geplant."
     if is_werkstatt_diagnosis(task) and end.time() > WERKSTATT_DIAGNOSIS_LATEST_END:
         return "Werkstattdiagnosen werden nicht spät abends geplant."
     if not in_hour_before_soundwerk(task, start, end, blocks):
@@ -660,7 +671,10 @@ def violates_evening_load_rule(
     has_full_workshop_day: bool,
     late_evening_p4_count: int = 0,
     light_after_large_evening_count: int = 0,
+    allow_late: bool = False,
 ) -> str | None:
+    if allow_late:
+        return None
     if start.time() < EVENING_START:
         return None
     if has_full_workshop_day and start.time() < EVENING_PROTECTED_END:
@@ -719,7 +733,9 @@ def choose_task(
     has_full_workshop_day: bool,
     late_evening_p4_count: int,
     light_after_large_evening_count: int,
+    options: PlanOptions | None = None,
 ) -> Task | None:
+    options = options or PlanOptions()
     fitting: list[Task] = []
     gap_minutes = int((slot_end - slot_start).total_seconds() // 60)
     lesson_gap = is_lesson_gap(slot_start, slot_end, blocks)
@@ -761,7 +777,7 @@ def choose_task(
             if gap_minutes >= 60 and candidate.duration_minutes > LESSON_GAP_PREFERRED_MAX_MINUTES:
                 continue
         end = slot_start + timedelta(minutes=candidate.duration_minutes)
-        if violates_time_rule(candidate, slot_start, end, blocks):
+        if violates_time_rule(candidate, slot_start, end, blocks, options):
             continue
         if violates_evening_load_rule(
             candidate,
@@ -771,6 +787,7 @@ def choose_task(
             has_full_workshop_day,
             late_evening_p4_count,
             light_after_large_evening_count,
+            options.allow_late,
         ):
             continue
         fitting.append(candidate)
@@ -963,7 +980,8 @@ def load_tasks_for_source(source: str) -> tuple[list[Task], str, bool, list[str]
     return [normalize_task(task) for task in result.tasks], result.status, False, warnings, result.status_details
 
 
-def build_plan(source: str, target_day: date, calendar_source: str, planning_start: datetime | None = None) -> PlanResult:
+def build_plan(source: str, target_day: date, calendar_source: str, planning_start: datetime | None = None, options: PlanOptions | None = None) -> PlanResult:
+    options = options or PlanOptions()
     tasks, source_status, fallback_used, warnings, source_details = load_tasks_for_source(source)
     calendar_result = load_calendar_blocks_for_source(calendar_source, target_day)
     if len(calendar_result) == 5:
@@ -1002,7 +1020,11 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
             warnings.append(
                 f"Planung für heute ab {fmt(planning_start)}. Frühere Zeitfenster werden nicht mehr beplant."
             )
-    free_windows = find_free_windows(target_day, hard_blockers, planning_start)
+    if options.allow_late:
+        warnings.append("Späte Planung durch --allow-late erlaubt.")
+    if options.admin_until is not None:
+        warnings.append(f"Admin/Buchhaltung durch Override bis {options.admin_until:%H:%M} erlaubt.")
+    free_windows = find_free_windows(target_day, hard_blockers, planning_start, options.day_end)
     free_minutes = sum(window.minutes for window in free_windows)
     capacity_minutes = int(free_minutes * MAX_PLANNED_PERCENT / 100)
 
@@ -1047,6 +1069,7 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
                 has_full_workshop_day,
                 late_evening_p4_count,
                 light_after_large_evening_count,
+                options,
             )
             if task is None:
                 werkstatt_window = werkstatt_window_for_day(target_day)
@@ -1141,6 +1164,8 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
         existing_auto_events=existing_auto_events,
         manually_covered_tasks=manually_covered_tasks,
         planning_start=planning_start,
+        plan_options=options,
+        open_task_context=tuple(open_task_context_for(not_scheduled + split_suggestions, fixed_blocks, free_windows, options)),
     )
 
 
@@ -1267,7 +1292,7 @@ def apply_calendar_write(plan: PlanResult, write_calendar: bool, replace_auto_ev
     try:
         if replace_auto_events:
             plan.calendar_deleted_events = delete_auto_events_for_date(
-                plan.target_day, target_calendar_id, not_before=plan.planning_start
+                plan.target_day, target_calendar_id, not_before=plan.planning_start, not_after=datetime.combine(plan.target_day, plan.plan_options.day_end)
             )
         for block in plan.planned_blocks:
             create_calendar_event(target_calendar_id, _calendar_event_body(block))
@@ -1304,6 +1329,85 @@ def is_lesson_gap_window(window: TimeWindow, blocks: list[Block]) -> bool:
     return is_lesson_gap(window.start, window.end, blocks)
 
 
+
+def task_can_fit_plan_window(task: Task, free_windows: list[TimeWindow], fixed_blocks: list[Block], options: PlanOptions) -> bool:
+    """Return whether an open task had a realistic slot in the considered planning window."""
+    for window in free_windows:
+        if task.duration_minutes > window.minutes:
+            continue
+        start = window.start
+        end = start + timedelta(minutes=task.duration_minutes)
+        if end > window.end or end.time() > options.day_end:
+            continue
+        if violates_time_rule(task, start, end, fixed_blocks, options):
+            continue
+        return True
+    return False
+
+
+def important_open_tasks_by_fit(plan: PlanResult) -> tuple[list[RejectedTask], list[RejectedTask]]:
+    actionable: list[RejectedTask] = []
+    contextual: list[RejectedTask] = []
+    for item in important_open_tasks(plan):
+        if task_can_fit_plan_window(item.task, plan.free_windows, plan.fixed_blocks, plan.plan_options):
+            actionable.append(item)
+        else:
+            contextual.append(item)
+    return actionable, contextual
+
+
+def category_window_reason(task: Task, plan: PlanResult) -> str:
+    if task.category == "Werkstatt":
+        return "kein passendes Werkstattfenster im betrachteten Planungszeitraum"
+    if task.category == "Buchhaltung":
+        return "kein erlaubtes Admin-/Buchhaltungsfenster im betrachteten Planungszeitraum"
+    if task.category in {"Studio", "ALEGRA"}:
+        return "kein passendes Studio-/ALEGRA-Fenster oder Tageslastfenster im betrachteten Planungszeitraum"
+    return "kein passendes Kategorie-Fenster im betrachteten Planungszeitraum"
+
+
+def open_task_context_for(
+    rejected: list[RejectedTask],
+    fixed_blocks: list[Block],
+    free_windows: list[TimeWindow],
+    options: PlanOptions,
+) -> list[str]:
+    important = [item for item in rejected if item.task.priority in {"P1", "P2"}]
+    if not important:
+        return []
+    actionable: list[RejectedTask] = []
+    contextual: list[RejectedTask] = []
+    dummy_plan = PlanResult(
+        target_day=free_windows[0].start.date() if free_windows else fixed_blocks[0].start.date() if fixed_blocks else date.today(),
+        source_status="", fixed_blocks=fixed_blocks, free_windows=free_windows, planned_blocks=[],
+        not_scheduled=[], split_suggestions=[], capacity_minutes=0, planned_minutes=0,
+        source="", calendar_source="", calendar_status="", plan_options=options,
+    )
+    for item in important:
+        if task_can_fit_plan_window(item.task, free_windows, fixed_blocks, options):
+            actionable.append(item)
+        else:
+            contextual.append(item)
+    lines: list[str] = []
+    if actionable:
+        lines.append(f"Offen und hätte heute eingeplant werden können: {len(actionable)} P1/P2-Aufgabe(n).")
+    if contextual:
+        by_reason: dict[str, int] = {}
+        for item in contextual:
+            reason = category_window_reason(item.task, dummy_plan)
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+        for reason, count in by_reason.items():
+            lines.append(f"Offen, aber heute nicht passend: {count} P1/P2-Aufgabe(n) – {reason}.")
+    return lines
+
+
+def is_restday_start_warning(warning: str) -> bool:
+    return warning.startswith("Planung für heute ab ") and "Frühere Zeitfenster" in warning
+
+
+def is_context_warning(warning: str) -> bool:
+    return is_restday_start_warning(warning) or warning.startswith("Späte Planung durch --allow-late") or warning.startswith("Admin/Buchhaltung durch Override")
+
 def plan_status(plan: PlanResult) -> str:
     if plan.validation_errors or plan.calendar_write_blocked_warning:
         return "BLOCKIERT"
@@ -1321,13 +1425,21 @@ def plan_quality_details(plan: PlanResult) -> tuple[int, list[str]]:
     if plan.calendar_write_blocked_warning:
         score -= 2
         reasons.append("Kalender-Schreiben wurde durch Sicherheitsgate blockiert")
-    if plan.warnings:
-        score -= min(2, len(plan.warnings))
-        reasons.extend(plan.warnings[:2])
-    open_high = len(important_open_tasks(plan))
-    score -= min(3, open_high)
+    hard_warnings = [warning for warning in plan.warnings if not is_context_warning(warning)]
+    if hard_warnings:
+        score -= min(2, len(hard_warnings))
+        reasons.extend(hard_warnings[:2])
+    elif any(is_context_warning(warning) for warning in plan.warnings):
+        reasons.extend(warning for warning in plan.warnings if is_context_warning(warning))
+
+    actionable_high, contextual_high = important_open_tasks_by_fit(plan)
+    open_high = len(actionable_high)
+    actionable_penalty_cap = 2 if plan.planning_start is not None and plan.planning_start.date() == plan.target_day and plan.planning_start.time() > DAY_START else 3
+    score -= min(actionable_penalty_cap, open_high)
     if open_high:
-        reasons.append("Mehrere P1/P2-Aufgaben offen geblieben" if open_high > 1 else "Eine P1/P2-Aufgabe offen geblieben")
+        reasons.append("Mehrere P1/P2-Aufgaben wären im betrachteten Zeitfenster möglich gewesen" if open_high > 1 else "Eine P1/P2-Aufgabe wäre im betrachteten Zeitfenster möglich gewesen")
+    if contextual_high:
+        reasons.extend(plan.open_task_context)
     if not plan.planned_blocks:
         score -= 2
         reasons.append("Keine Aufgaben automatisch eingeplant")
@@ -1340,10 +1452,10 @@ def plan_quality_details(plan: PlanResult) -> tuple[int, list[str]]:
         reasons.append("Viele Aufgaben haben nur geschätzte Dauer")
     if any("Abend-Fokuslimit" in item.reason or "Tageslast" in item.reason for item in plan.not_scheduled):
         reasons.append("Abend-Fokuslimit erreicht oder Tageslast zu hoch")
-    if any(item.task.category == "Buchhaltung" and item.task.priority in {"P1", "P2"} for item in important_open_tasks(plan)):
-        reasons.append("Buchhaltungs-/Admin-Aufgaben wegen Tageslast nicht eingeplant")
-    if any(item.task.category == "Werkstatt" and item.task.priority in {"P1", "P2"} for item in important_open_tasks(plan)):
-        reasons.append("Werkstattaufgaben konnten wegen fehlender langer Werkstattfenster nicht eingeplant werden")
+    if any(item.task.category == "Buchhaltung" for item in actionable_high):
+        reasons.append("Buchhaltungs-/Admin-Aufgaben wären im erlaubten Zeitfenster möglich gewesen")
+    if any(item.task.category == "Werkstatt" for item in contextual_high):
+        reasons.append("Werkstattaufgaben offen, aber kein passendes Werkstattfenster im betrachteten Planungszeitraum")
     return max(0, min(10, score)), list(dict.fromkeys(reasons))
 
 
@@ -1377,7 +1489,7 @@ def render_plan_card(plan: PlanResult) -> list[str]:
         lines.append("- Kurzplan: Keine Aufgaben automatisch eingeplant.")
 
     important_warnings = list(dict.fromkeys(plan.validation_errors + plan.warnings + quality_reasons))[:5]
-    lines.append("- Wichtige Warnungen:")
+    lines.append("- Wichtige Warnungen/Hinweise:")
     if important_warnings:
         lines.extend(f"  - {warning}" for warning in important_warnings)
     elif status in {"PRÜFEN", "BLOCKIERT"}:
@@ -1385,10 +1497,15 @@ def render_plan_card(plan: PlanResult) -> list[str]:
     else:
         lines.append("  - Keine.")
 
-    open_tasks = important_open_tasks(plan)[:5]
-    lines.append("- Offene wichtige P1/P2-Aufgaben:")
-    if open_tasks:
-        lines.extend(f"  - {render_task(item.task)} – {item.reason}" for item in open_tasks)
+    actionable_open, contextual_open = important_open_tasks_by_fit(plan)
+    lines.append("- Offen und hätte heute eingeplant werden können:")
+    if actionable_open:
+        lines.extend(f"  - {render_task(item.task)} – {item.reason}" for item in actionable_open[:5])
+    else:
+        lines.append("  - Keine.")
+    lines.append("- Offen, aber heute nicht passend / Backlog-Kontext:")
+    if contextual_open:
+        lines.extend(f"  - {render_task(item.task)} – {category_window_reason(item.task, plan)}." for item in contextual_open[:5])
     else:
         lines.append("  - Keine.")
     lines.append("")
@@ -1417,7 +1534,13 @@ def render_plan(plan: PlanResult) -> str:
     lines.append("- Standard ist Dry-Run: Kalender-Schreiben nur mit `--write-calendar` und `GOOGLE_CALENDAR_WRITE_ENABLED=true`.")
     if plan.planning_start is not None and plan.planning_start.date() == plan.target_day:
         lines.append(f"- Zieltag wird ab {fmt(plan.planning_start)} geplant; frühere Zeitfenster werden ignoriert.")
-    lines.append("- Geplant wird nur zwischen 09:00 und 23:00 Uhr.")
+    lines.append(f"- Geplant wird nur zwischen 09:00 und {plan.plan_options.day_end:%H:%M} Uhr.")
+    if plan.plan_options.day_end != DAY_END:
+        lines.append(f"- Ausnahme aktiv: Planung bis {plan.plan_options.day_end:%H:%M} erlaubt.")
+    if plan.plan_options.allow_late:
+        lines.append("- Ausnahme aktiv: späte Planung durch --allow-late erlaubt.")
+    if plan.plan_options.admin_until is not None:
+        lines.append(f"- Admin/Buchhaltung erlaubt bis {plan.plan_options.admin_until:%H:%M}.")
     lines.append(f"- Freie Zeit: {free_minutes} Minuten; davon maximal 70 Prozent verplant: {plan.capacity_minutes} Minuten.")
     lines.append("- Maximal 6 Hauptaufgaben und 2 Mini-Tasks werden automatisch eingeplant.")
     lines.append("")
@@ -1511,6 +1634,13 @@ def render_plan(plan: PlanResult) -> str:
     lines.append("- Werkstattdiagnosen erhalten zusätzlich einen expliziten 15-Minuten-Reset-Puffer.")
     lines.append("")
 
+    lines.append("## Einordnung offener wichtiger Aufgaben")
+    if plan.open_task_context:
+        lines.extend(f"- {detail}" for detail in plan.open_task_context)
+    else:
+        lines.append("- Keine zusätzlichen Backlog-/Kontext-Hinweise.")
+    lines.append("")
+
     lines.append("## Nicht eingeplant")
     combined_not_scheduled = plan.not_scheduled + plan.split_suggestions
     if combined_not_scheduled:
@@ -1563,14 +1693,32 @@ def parse_args() -> argparse.Namespace:
         "--start-time",
         help="Früheste Planungszeit am Zieltag im Format HH:MM; schützt bei today vor Planung in die Vergangenheit.",
     )
-    return parser.parse_args()
+    parser.add_argument("--until", help="Späteste Planungsgrenze im Format HH:MM. Keine Auto-Events enden danach.")
+    parser.add_argument("--allow-late", action="store_true", help="Abend- und Tageslastregeln für diesen Lauf lockern.")
+    parser.add_argument("--allow-admin-until", help="Admin/Buchhaltung bis zu dieser Uhrzeit im Format HH:MM erlauben.")
+    args = parser.parse_args()
+    for attr, label in (("start_time", "--start-time"), ("until", "--until"), ("allow_admin_until", "--allow-admin-until")):
+        value = getattr(args, attr, None)
+        if value:
+            try:
+                parse_hhmm(value)
+            except ValueError:
+                parser.error(f"{label} muss im Format HH:MM angegeben werden.")
+    if args.until and args.allow_admin_until and parse_hhmm(args.allow_admin_until) > parse_hhmm(args.until):
+        parser.error("--allow-admin-until darf nicht später als --until sein.")
+    return args
 
 
 def main() -> None:
     args = parse_args()
     target_day = date.fromisoformat(args.date) if args.date else date.today() + timedelta(days=1)
     planning_start = datetime.combine(target_day, parse_hhmm(args.start_time)) if args.start_time else None
-    plan = build_plan(args.source, target_day, args.calendar_source, planning_start=planning_start)
+    options = PlanOptions(
+        day_end=parse_hhmm(args.until) if args.until else DAY_END,
+        allow_late=args.allow_late,
+        admin_until=parse_hhmm(args.allow_admin_until) if args.allow_admin_until else None,
+    )
+    plan = build_plan(args.source, target_day, args.calendar_source, planning_start=planning_start, options=options)
     plan.validation_errors = validate_planned_blocks(plan)
     apply_calendar_write(plan, args.write_calendar, args.replace_auto_events)
     print(render_plan(plan))
