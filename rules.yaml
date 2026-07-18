@@ -24,7 +24,7 @@ safety:
   never_write_secrets_to_repo: true
 
 planning_window:
-  target_day: tomorrow
+  target_day: today_or_tomorrow
   start: "09:00"
   end: "23:00"
 
@@ -68,22 +68,14 @@ weekly_structure:
       end: "14:00"
       location: Mengen
       categories: [Werkstatt]
-    - title: Soundwerk Unterricht
-      start: "14:00"
-      end: "16:00"
-      location: Aulendorf
-      categories: [Soundwerk]
+    # Soundwerk/Unterricht ist nur Orientierung; echte Termine kommen aus Google Calendar.
   wednesday:
     - title: Werkstatt
       start: "09:00"
       end: "14:00"
       location: Mengen
       categories: [Werkstatt]
-    - title: Soundwerk Unterricht
-      start: "14:00"
-      end: "18:30"
-      location: Aulendorf
-      categories: [Soundwerk]
+    # Soundwerk/Unterricht ist nur Orientierung; echte Termine kommen aus Google Calendar.
   thursday:
     - title: Werkstatt
       start: "09:00"

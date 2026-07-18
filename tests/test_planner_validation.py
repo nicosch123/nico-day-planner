@@ -20,6 +20,11 @@ from dry_run_plan import (  # noqa: E402
     build_plan,
     _calendar_event_body,
     validate_planned_blocks,
+    buffered_planning_blockers,
+    find_free_windows,
+    lunch_break_block,
+    overlaps,
+    weekly_blocks,
 )
 import dry_run_plan  # noqa: E402
 from google_calendar_client import _event_to_block  # noqa: E402
@@ -549,6 +554,131 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         self.assertIn("Werkstatt Mengen", availability_section)
         self.assertIn("Bestehender Auto-Plan", auto_section)
 
+    def test_today_start_time_prevents_planning_before_noon(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [Task("privat-1", "Mittagsplanung", "Privat", "P1", 30)],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: ([], "test", False, [], (), [])
+
+            plan = build_plan("todoist", date(2026, 7, 18), "google", planning_start=datetime(2026, 7, 18, 12, 0))
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        self.assertTrue(plan.planned_blocks)
+        self.assertTrue(all(block.start >= datetime(2026, 7, 18, 12, 0) for block in plan.planned_blocks))
+        self.assertTrue(all(window.start >= datetime(2026, 7, 18, 12, 0) for window in plan.free_windows))
+        self.assertTrue(any("Planung für heute ab 12:00" in warning for warning in plan.warnings))
+
+    def test_from_now_uses_rounded_now_slot_for_today(self) -> None:
+        original_rounded = planner.rounded_now_slot
+        try:
+            planner.rounded_now_slot = lambda: datetime.combine(date.today(), datetime.strptime("12:07", "%H:%M").time())
+            args = argparse.Namespace(command="preview", start_time=None, from_now=True)
+            start = planner.planning_start_for(args, date.today())
+        finally:
+            planner.rounded_now_slot = original_rounded
+
+        self.assertIsNotNone(start)
+        assert start is not None
+        self.assertEqual(start.minute, 7)
+        # rounded_now_slot is responsible for rounding; planner uses it as minimum start.
+
+    def test_weekly_soundwerk_blocks_no_longer_block_tuesday_afternoon(self) -> None:
+        target_day = date(2026, 6, 30)  # Tuesday
+        weekly = weekly_blocks(target_day)
+
+        self.assertFalse(any("Soundwerk Unterricht" in block.title for block in weekly))
+        free = find_free_windows(target_day, buffered_planning_blockers(weekly + [lunch_break_block(target_day)]))
+        self.assertTrue(any(window.start <= datetime(2026, 6, 30, 14, 0) and window.end >= datetime(2026, 6, 30, 18, 0) for window in free))
+
+    def test_google_lesson_blocks_remain_hard_blockers_and_gaps_are_used(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [
+                    Task("privat-1", "Private Ablage", "Privat", "P1", 30),
+                    Task("werkstatt-1", "Große Diagnose", "Werkstatt", "P1", 60),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: (
+                [
+                    Block("lesson-1", "Soundwerk Unterricht Noah", datetime(2026, 6, 30, 14, 0), datetime(2026, 6, 30, 14, 30), "Google Calendar"),
+                    Block("lesson-2", "Soundwerk Unterricht Mia", datetime(2026, 6, 30, 15, 15), datetime(2026, 6, 30, 15, 45), "Google Calendar"),
+                ],
+                "test",
+                False,
+                [],
+                (),
+                [],
+            )
+
+            plan = build_plan("todoist", date(2026, 6, 30), "google")
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        self.assertTrue(any(block.task.title == "Private Ablage" and block.start == datetime(2026, 6, 30, 14, 30) for block in plan.planned_blocks))
+        self.assertFalse(any(overlaps(block.start, block.end, datetime(2026, 6, 30, 14, 0), datetime(2026, 6, 30, 14, 30)) for block in plan.planned_blocks))
+        self.assertFalse(any(overlaps(block.start, block.end, datetime(2026, 6, 30, 15, 15), datetime(2026, 6, 30, 15, 45)) for block in plan.planned_blocks))
+
+    def test_day_write_start_time_deletes_only_future_day_auto_events(self) -> None:
+        calls: list[str] = []
+        original_delete = dry_run_plan.delete_auto_events_for_date
+        original_create = dry_run_plan.create_calendar_event
+        original_gate = dry_run_plan.os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED")
+
+        plan = PlanResult(
+            target_day=date(2026, 7, 18),
+            source_status="test",
+            fixed_blocks=[],
+            free_windows=[],
+            planned_blocks=[PlannedBlock(Task("new", "Neue Aufgabe", "Privat", "P1", 30), datetime(2026, 7, 18, 12, 0), datetime(2026, 7, 18, 12, 30))],
+            not_scheduled=[],
+            split_suggestions=[],
+            capacity_minutes=30,
+            planned_minutes=30,
+            source="todoist",
+            calendar_source="google",
+            calendar_status="test",
+            planning_start=datetime(2026, 7, 18, 12, 0),
+        )
+
+        def fake_delete(_day: date, _calendar_id: str, marker: str = dry_run_plan.AUTO_EVENT_MARKER, not_before: datetime | None = None) -> int:
+            calls.append(f"delete:{marker}:{not_before:%H:%M}" if not_before else f"delete:{marker}:none")
+            return 1
+
+        def fake_create(_calendar_id: str, _body: dict[str, object]) -> str:
+            calls.append("create")
+            return "created"
+
+        try:
+            dry_run_plan.delete_auto_events_for_date = fake_delete
+            dry_run_plan.create_calendar_event = fake_create
+            dry_run_plan.os.environ["GOOGLE_CALENDAR_WRITE_ENABLED"] = "true"
+            apply_calendar_write(plan, write_calendar=True, replace_auto_events=True)
+        finally:
+            dry_run_plan.delete_auto_events_for_date = original_delete
+            dry_run_plan.create_calendar_event = original_create
+            if original_gate is None:
+                dry_run_plan.os.environ.pop("GOOGLE_CALENDAR_WRITE_ENABLED", None)
+            else:
+                dry_run_plan.os.environ["GOOGLE_CALENDAR_WRITE_ENABLED"] = original_gate
+
+        self.assertEqual(calls, ["delete:NICO_DAY_PLANNER_AUTO:12:00", "create"])
+
 
 class WeeklyPlannerSafetyTest(unittest.TestCase):
     def test_delete_auto_events_for_date_accepts_separate_week_marker(self) -> None:
@@ -596,7 +726,7 @@ class WeeklyPlannerSafetyTest(unittest.TestCase):
         original_run = planner.subprocess.run
         original_gate = planner.os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED")
 
-        def fake_delete(target_day: date, _calendar_id: str, marker: str = "") -> int:
+        def fake_delete(target_day: date, _calendar_id: str, marker: str = "", not_before: datetime | None = None) -> int:
             calls.append((target_day, marker))
             return 2
 

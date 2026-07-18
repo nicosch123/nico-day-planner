@@ -114,11 +114,9 @@ WEEKLY_STRUCTURE: dict[int, list[dict[str, Any]]] = {
     ],
     1: [
         {"title": "Werkstatt", "start": "09:00", "end": "14:00", "location": "Mengen", "categories": ["Werkstatt"]},
-        {"title": "Soundwerk Unterricht", "start": "14:00", "end": "16:00", "location": "Aulendorf", "categories": ["Soundwerk"]},
     ],
     2: [
         {"title": "Werkstatt", "start": "09:00", "end": "14:00", "location": "Mengen", "categories": ["Werkstatt"]},
-        {"title": "Soundwerk Unterricht", "start": "14:00", "end": "18:30", "location": "Aulendorf", "categories": ["Soundwerk"]},
     ],
     3: [
         {"title": "Werkstatt", "start": "09:00", "end": "12:00", "location": "Mengen", "categories": ["Werkstatt"]},
@@ -219,6 +217,7 @@ class PlanResult:
     load_diagnostics: list[str] = field(default_factory=list)
     existing_auto_events: list[Block] = field(default_factory=list)
     manually_covered_tasks: list[Task] = field(default_factory=list)
+    planning_start: datetime | None = None
 
 
 def parse_hhmm(value: str) -> time:
@@ -510,8 +509,10 @@ def overlaps(start: datetime, end: datetime, block_start: datetime, block_end: d
     return start < block_end and end > block_start
 
 
-def find_free_windows(target_day: date, blocks: list[Block]) -> list[TimeWindow]:
+def find_free_windows(target_day: date, blocks: list[Block], planning_start: datetime | None = None) -> list[TimeWindow]:
     day_start = datetime.combine(target_day, DAY_START)
+    if planning_start is not None and planning_start.date() == target_day:
+        day_start = max(day_start, planning_start)
     day_end = datetime.combine(target_day, DAY_END)
     cursor = day_start
     windows: list[TimeWindow] = []
@@ -539,7 +540,13 @@ def is_mini_task(task: Task) -> bool:
 
 
 def soundwerk_lesson_blocks(blocks: list[Block]) -> list[Block]:
-    return [block for block in blocks if "Soundwerk" in block.categories]
+    lesson_terms = ("soundwerk", "unterricht", "schüler", "schueler")
+    return [
+        block
+        for block in blocks
+        if "Soundwerk" in block.categories
+        or (block.source == "Google Calendar" and any(term in block.title.lower() for term in lesson_terms))
+    ]
 
 
 def is_lesson_gap(start: datetime, end: datetime, blocks: list[Block]) -> bool:
@@ -956,7 +963,7 @@ def load_tasks_for_source(source: str) -> tuple[list[Task], str, bool, list[str]
     return [normalize_task(task) for task in result.tasks], result.status, False, warnings, result.status_details
 
 
-def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResult:
+def build_plan(source: str, target_day: date, calendar_source: str, planning_start: datetime | None = None) -> PlanResult:
     tasks, source_status, fallback_used, warnings, source_details = load_tasks_for_source(source)
     calendar_result = load_calendar_blocks_for_source(calendar_source, target_day)
     if len(calendar_result) == 5:
@@ -990,7 +997,12 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
     fixed_blocks += travel_blocks(fixed_blocks)
     fixed_blocks = merge_overlapping(fixed_blocks)
     hard_blockers = buffered_planning_blockers(fixed_blocks)
-    free_windows = find_free_windows(target_day, hard_blockers)
+    if planning_start is not None and planning_start.date() == target_day:
+        if planning_start.time() > DAY_START:
+            warnings.append(
+                f"Planung für heute ab {fmt(planning_start)}. Frühere Zeitfenster werden nicht mehr beplant."
+            )
+    free_windows = find_free_windows(target_day, hard_blockers, planning_start)
     free_minutes = sum(window.minutes for window in free_windows)
     capacity_minutes = int(free_minutes * MAX_PLANNED_PERCENT / 100)
 
@@ -1128,6 +1140,7 @@ def build_plan(source: str, target_day: date, calendar_source: str) -> PlanResul
         load_diagnostics=load_diagnostics,
         existing_auto_events=existing_auto_events,
         manually_covered_tasks=manually_covered_tasks,
+        planning_start=planning_start,
     )
 
 
@@ -1184,6 +1197,10 @@ def validate_planned_blocks(plan: PlanResult) -> list[str]:
     for block in sorted_planned:
         if block.end <= block.start:
             errors.append(f"Ungültiger Auto-Block: {render_task(block.task)} {fmt(block.start)}–{fmt(block.end)}.")
+        if plan.planning_start is not None and block.start < plan.planning_start:
+            errors.append(
+                f"Auto-Block liegt vor Planungsstart: {render_task(block.task)} {fmt(block.start)}–{fmt(block.end)}; Start ist {fmt(plan.planning_start)}."
+            )
         if previous is not None and block.start < previous.end:
             errors.append(
                 "Überschneidung zwischen Auto-Blöcken: "
@@ -1249,7 +1266,9 @@ def apply_calendar_write(plan: PlanResult, write_calendar: bool, replace_auto_ev
     plan.calendar_write_enabled = True
     try:
         if replace_auto_events:
-            plan.calendar_deleted_events = delete_auto_events_for_date(plan.target_day, target_calendar_id)
+            plan.calendar_deleted_events = delete_auto_events_for_date(
+                plan.target_day, target_calendar_id, not_before=plan.planning_start
+            )
         for block in plan.planned_blocks:
             create_calendar_event(target_calendar_id, _calendar_event_body(block))
             plan.calendar_created_events += 1
@@ -1396,6 +1415,8 @@ def render_plan(plan: PlanResult) -> str:
     lines.append("")
     lines.append("## Annahmen")
     lines.append("- Standard ist Dry-Run: Kalender-Schreiben nur mit `--write-calendar` und `GOOGLE_CALENDAR_WRITE_ENABLED=true`.")
+    if plan.planning_start is not None and plan.planning_start.date() == plan.target_day:
+        lines.append(f"- Zieltag wird ab {fmt(plan.planning_start)} geplant; frühere Zeitfenster werden ignoriert.")
     lines.append("- Geplant wird nur zwischen 09:00 und 23:00 Uhr.")
     lines.append(f"- Freie Zeit: {free_minutes} Minuten; davon maximal 70 Prozent verplant: {plan.capacity_minutes} Minuten.")
     lines.append("- Maximal 6 Hauptaufgaben und 2 Mini-Tasks werden automatisch eingeplant.")
@@ -1538,13 +1559,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=f"Alte Planner-Events am Zieltag ersetzen; löscht nur Events mit Marker {AUTO_EVENT_MARKER}.",
     )
+    parser.add_argument(
+        "--start-time",
+        help="Früheste Planungszeit am Zieltag im Format HH:MM; schützt bei today vor Planung in die Vergangenheit.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     target_day = date.fromisoformat(args.date) if args.date else date.today() + timedelta(days=1)
-    plan = build_plan(args.source, target_day, args.calendar_source)
+    planning_start = datetime.combine(target_day, parse_hhmm(args.start_time)) if args.start_time else None
+    plan = build_plan(args.source, target_day, args.calendar_source, planning_start=planning_start)
     plan.validation_errors = validate_planned_blocks(plan)
     apply_calendar_write(plan, args.write_calendar, args.replace_auto_events)
     print(render_plan(plan))

@@ -107,6 +107,15 @@ def build_parser() -> argparse.ArgumentParser:
             help="Freitext-Hinweis für spätere Phasen. Wird in Phase 1 angezeigt und als NICO_PLANNER_NOTE übergeben.",
         )
         day_parser.add_argument(
+            "--from-now",
+            action="store_true",
+            help="Für today ab aktueller Uhrzeit planen (auf den nächsten 15-Minuten-Slot gerundet).",
+        )
+        day_parser.add_argument(
+            "--start-time",
+            help="Früheste Planungszeit für today im Format HH:MM, z. B. 12:00.",
+        )
+        day_parser.add_argument(
             "--from",
             dest="from_time",
             help="Manueller Startzeitpunkt, z. B. 09:00. Wird in Phase 1 angezeigt und als NICO_PLANNER_FROM übergeben.",
@@ -159,7 +168,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def print_header(args: argparse.Namespace, target_day: date) -> None:
+def parse_cli_hhmm(value: str) -> datetime.time:
+    return datetime.strptime(value, "%H:%M").time()
+
+
+def rounded_now_slot(step_minutes: int = 15) -> datetime:
+    now = datetime.now().astimezone().replace(tzinfo=None, second=0, microsecond=0)
+    minutes = ((now.minute + step_minutes - 1) // step_minutes) * step_minutes
+    return now.replace(minute=0) + timedelta(minutes=minutes)
+
+
+def planning_start_for(args: argparse.Namespace, target_day: date) -> datetime | None:
+    if getattr(args, "start_time", None):
+        return datetime.combine(target_day, parse_cli_hhmm(args.start_time))
+    if target_day == date.today() and (getattr(args, "from_now", False) or args.command in {"preview", "write"}):
+        now_slot = rounded_now_slot()
+        return datetime.combine(target_day, max(now_slot.time(), parse_cli_hhmm("09:00")))
+    return None
+
+
+def print_header(args: argparse.Namespace, target_day: date, planning_start: datetime | None = None) -> None:
     print("Nico Day Planner – Anwendungsschicht Phase 1")
     print("--------------------------------------------")
     print(f"Command: {args.command}")
@@ -167,6 +195,9 @@ def print_header(args: argparse.Namespace, target_day: date) -> None:
     print(f"Modus: {args.mode}")
     if args.note:
         print(f"Hinweis: {args.note}")
+    if planning_start is not None and planning_start.date() == target_day:
+        label = "heute" if target_day == date.today() else target_day.isoformat()
+        print(f"Planung für {label} ab {planning_start:%H:%M}. Frühere Zeitfenster werden nicht mehr beplant.")
     if args.from_time or args.to_time:
         start = args.from_time or "nicht gesetzt"
         end = args.to_time or "nicht gesetzt"
@@ -186,7 +217,7 @@ def planner_environment(args: argparse.Namespace) -> dict[str, str]:
     return env
 
 
-def run_existing_planner(args: argparse.Namespace, target_day: date) -> int:
+def run_existing_planner(args: argparse.Namespace, target_day: date, planning_start: datetime | None = None) -> int:
     if args.command == "write" and os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED") == "true":
         calendar_id = os.environ.get(CALENDAR_ID_ENV_VAR, DEFAULT_CALENDAR_ID)
         try:
@@ -194,6 +225,7 @@ def run_existing_planner(args: argparse.Namespace, target_day: date) -> int:
                 target_day,
                 calendar_id,
                 marker=WEEK_AUTO_EVENT_MARKER,
+                not_before=planning_start,
             )
         except GoogleCalendarReadError as exc:
             print(f"Tagesplanung gewinnt: Wochenplan-Events konnten nicht entfernt werden ({exc}).")
@@ -213,6 +245,9 @@ def run_existing_planner(args: argparse.Namespace, target_day: date) -> int:
         "--date",
         target_day.isoformat(),
     ]
+
+    if planning_start is not None:
+        command.extend(["--start-time", planning_start.strftime("%H:%M")])
 
     if args.command == "write":
         command.extend(["--write-calendar", "--replace-auto-events"])
@@ -934,8 +969,16 @@ def validate_command_day_combination(parser: argparse.ArgumentParser, args: argp
         if args.week_days < 1:
             parser.error("week --days muss mindestens 1 sein.")
         return
-    if args.command in {"preview", "write"} and args.day != "tomorrow":
-        parser.error("preview/write unterstützen in Phase 1 nur den Zieltag 'tomorrow'.")
+    if args.command in {"preview", "write"}:
+        if args.day not in {"today", "tomorrow"}:
+            parser.error("preview/write unterstützen die Zieltage today oder tomorrow.")
+        if args.from_now and args.start_time:
+            parser.error("Bitte entweder --from-now oder --start-time verwenden, nicht beides.")
+        if args.start_time:
+            try:
+                parse_cli_hhmm(args.start_time)
+            except ValueError:
+                parser.error("--start-time muss im Format HH:MM angegeben werden.")
     if args.command == "review":
         try:
             target_date_for(args.day)
@@ -959,12 +1002,14 @@ def main() -> int:
 
     target_day = target_date_for(args.day)
 
-    print_header(args, target_day)
+    planning_start = planning_start_for(args, target_day)
+
+    print_header(args, target_day, planning_start)
 
     if args.command == "review":
         return run_review(args, target_day)
 
-    return run_existing_planner(args, target_day)
+    return run_existing_planner(args, target_day, planning_start)
 
 
 if __name__ == "__main__":
