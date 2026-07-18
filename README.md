@@ -141,7 +141,17 @@ python3 scripts/planner.py preview tomorrow --note "Morgen nur Werkstatt und abe
 python3 scripts/planner.py preview tomorrow --from 09:00 --to 21:00
 ```
 
-Unterstützte Modi sind `normal`, `light`, `focus-workshop`, `admin-evening`, `no-evening` und `push`.
+Unterstützte Modi sind `normal`, `light`, `focus-workshop`, `admin-evening`, `no-evening` und `push`. Der Modus `push` aktiviert dieselbe späte Ausnahme wie `--allow-late`.
+
+Tagesplanung kann für einen einzelnen Lauf bewusst gelockert werden, ohne die Kalender-Sicherheitsgates zu verändern:
+
+```bash
+python3 scripts/planner.py preview today --start-time 14:00 --until 23:00
+python3 scripts/planner.py preview today --start-time 14:00 --until 23:00 --allow-late
+python3 scripts/planner.py preview today --start-time 14:00 --allow-admin-until 23:00
+```
+
+`--until HH:MM` setzt die harte Planungsgrenze für Auto-Blöcke und Replace-Löschungen im Tagesplan. `--allow-late` lockert Abend-/Tageslastregeln für diesen Lauf. `--allow-admin-until HH:MM` erlaubt Buchhaltung/Admin später, bleibt aber durch `--until` begrenzt, wenn beide Optionen gesetzt sind. Ungültige Uhrzeiten werden mit Exit Code ungleich 0 abgelehnt.
 
 ## Wochenplanung
 

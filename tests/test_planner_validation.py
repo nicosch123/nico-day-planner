@@ -591,6 +591,119 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         self.assertEqual(start.minute, 7)
         # rounded_now_slot is responsible for rounding; planner uses it as minimum start.
 
+    def test_restday_quality_treats_workshop_backlog_as_context(self) -> None:
+        target_day = date(2026, 7, 18)  # Saturday, no Werkstatt window.
+        planned = Task("studio-1", "Studio Resttag", "Studio", "P1", 60)
+        workshop = Task("werkstatt-1", "Echolette NG51", "Werkstatt", "P1", 90)
+        plan = PlanResult(
+            target_day=target_day,
+            source_status="test",
+            fixed_blocks=[],
+            free_windows=[TimeWindow(datetime(2026, 7, 18, 14, 0), datetime(2026, 7, 18, 23, 0))],
+            planned_blocks=[PlannedBlock(planned, datetime(2026, 7, 18, 14, 0), datetime(2026, 7, 18, 15, 0))],
+            not_scheduled=[RejectedTask(workshop, "kein ausreichend langes Werkstattfenster mehr frei.")],
+            split_suggestions=[],
+            capacity_minutes=378,
+            planned_minutes=60,
+            source="todoist",
+            calendar_source="google",
+            calendar_status="test",
+            warnings=["Planung für heute ab 14:00. Frühere Zeitfenster werden nicht mehr beplant."],
+            planning_start=datetime(2026, 7, 18, 14, 0),
+            plan_options=dry_run_plan.PlanOptions(),
+            open_task_context=("Offen, aber heute nicht passend: 1 P1/P2-Aufgabe(n) – kein passendes Werkstattfenster im betrachteten Planungszeitraum.",),
+        )
+
+        quality, reasons = dry_run_plan.plan_quality_details(plan)
+        rendered = dry_run_plan.render_plan(plan)
+
+        self.assertGreaterEqual(quality, 8)
+        self.assertIn("Werkstattaufgaben offen, aber kein passendes Werkstattfenster", "\n".join(reasons))
+        self.assertIn("Offen, aber heute nicht passend", rendered)
+        self.assertIn("kein passendes Werkstattfenster im betrachteten Planungszeitraum", rendered)
+
+    def test_until_limits_free_windows_and_planned_blocks(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [Task("studio-1", "Abendblock", "Studio", "P1", 120)],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: ([], "test", False, [], (), [])
+            plan = build_plan(
+                "todoist",
+                date(2026, 7, 18),
+                "google",
+                planning_start=datetime(2026, 7, 18, 14, 0),
+                options=dry_run_plan.PlanOptions(day_end=planner.parse_cli_hhmm("23:00")),
+            )
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        self.assertTrue(plan.planned_blocks)
+        self.assertTrue(all(block.end <= datetime(2026, 7, 18, 23, 0) for block in plan.planned_blocks))
+        self.assertTrue(all(window.end <= datetime(2026, 7, 18, 23, 0) for window in plan.free_windows))
+
+    def test_allow_late_permits_additional_evening_block(self) -> None:
+        tasks = [
+            Task("studio-1", "Erster Studioabend", "Studio", "P1", 90),
+            Task("admin-1", "Rechnung hochladen", "Buchhaltung", "P2", 60),
+        ]
+        fixed = []
+        normal = dry_run_plan.choose_task(
+            tasks[1:],
+            datetime(2026, 7, 18, 20, 45),
+            datetime(2026, 7, 18, 23, 0),
+            120,
+            fixed,
+            1,
+            0,
+            1,
+            0,
+            set(),
+            {},
+            False,
+            0,
+            0,
+            dry_run_plan.PlanOptions(),
+        )
+        late = dry_run_plan.choose_task(
+            tasks[1:],
+            datetime(2026, 7, 18, 21, 15),
+            datetime(2026, 7, 18, 23, 0),
+            120,
+            fixed,
+            1,
+            0,
+            1,
+            0,
+            set(),
+            {},
+            False,
+            0,
+            0,
+            dry_run_plan.PlanOptions(allow_late=True, admin_until=planner.parse_cli_hhmm("23:00")),
+        )
+
+        self.assertIsNone(normal)
+        self.assertIsNotNone(late)
+        assert late is not None
+        self.assertEqual(late.id, "admin-1")
+
+    def test_cli_rejects_invalid_until_and_admin_until(self) -> None:
+        parser = planner.build_parser()
+        with self.assertRaises(SystemExit):
+            args = parser.parse_args(["preview", "today", "--until", "25:00"])
+            planner.validate_command_day_combination(parser, args)
+        with self.assertRaises(SystemExit):
+            args = parser.parse_args(["preview", "today", "--allow-admin-until", "99:99"])
+            planner.validate_command_day_combination(parser, args)
+
     def test_weekly_soundwerk_blocks_no_longer_block_tuesday_afternoon(self) -> None:
         target_day = date(2026, 6, 30)  # Tuesday
         weekly = weekly_blocks(target_day)
@@ -656,7 +769,7 @@ class PlannerValidationRegressionTest(unittest.TestCase):
             planning_start=datetime(2026, 7, 18, 12, 0),
         )
 
-        def fake_delete(_day: date, _calendar_id: str, marker: str = dry_run_plan.AUTO_EVENT_MARKER, not_before: datetime | None = None) -> int:
+        def fake_delete(_day: date, _calendar_id: str, marker: str = dry_run_plan.AUTO_EVENT_MARKER, not_before: datetime | None = None, not_after: datetime | None = None) -> int:
             calls.append(f"delete:{marker}:{not_before:%H:%M}" if not_before else f"delete:{marker}:none")
             return 1
 
@@ -726,7 +839,7 @@ class WeeklyPlannerSafetyTest(unittest.TestCase):
         original_run = planner.subprocess.run
         original_gate = planner.os.environ.get("GOOGLE_CALENDAR_WRITE_ENABLED")
 
-        def fake_delete(target_day: date, _calendar_id: str, marker: str = "", not_before: datetime | None = None) -> int:
+        def fake_delete(target_day: date, _calendar_id: str, marker: str = "", not_before: datetime | None = None, not_after: datetime | None = None) -> int:
             calls.append((target_day, marker))
             return 2
 
@@ -737,7 +850,7 @@ class WeeklyPlannerSafetyTest(unittest.TestCase):
             planner.delete_auto_events_for_date = fake_delete
             planner.subprocess.run = lambda *_args, **_kwargs: Completed()
             planner.os.environ["GOOGLE_CALENDAR_WRITE_ENABLED"] = "true"
-            args = type("Args", (), {"command": "write", "mode": "normal", "note": None, "from_time": None, "to_time": None})()
+            args = type("Args", (), {"command": "write", "mode": "normal", "note": None, "from_time": None, "to_time": None, "until": None, "allow_late": False, "allow_admin_until": None})()
 
             result = planner.run_existing_planner(args, date(2026, 6, 29))
         finally:

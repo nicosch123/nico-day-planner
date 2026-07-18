@@ -125,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
             dest="to_time",
             help="Manueller Endzeitpunkt, z. B. 21:00. Wird in Phase 1 angezeigt und als NICO_PLANNER_TO übergeben.",
         )
+        day_parser.add_argument("--until", help="Späteste Planungsgrenze im Format HH:MM; keine Auto-Events enden danach.")
+        day_parser.add_argument("--allow-late", action="store_true", help="Abend- und Tageslastregeln für diesen Lauf lockern.")
+        day_parser.add_argument("--allow-admin-until", help="Admin/Buchhaltung bis zu dieser Uhrzeit im Format HH:MM erlauben.")
 
     for command in ("preview", "write", "review"):
         day_parser = subparsers.add_parser(command)
@@ -202,6 +205,12 @@ def print_header(args: argparse.Namespace, target_day: date, planning_start: dat
         start = args.from_time or "nicht gesetzt"
         end = args.to_time or "nicht gesetzt"
         print(f"Manueller Zeitraum: {start}–{end}")
+    if getattr(args, "until", None):
+        print(f"Ausnahme aktiv: Planung bis {args.until} erlaubt.")
+    if getattr(args, "allow_late", False) or getattr(args, "mode", "") == "push":
+        print("Ausnahme aktiv: späte Planung erlaubt.")
+    if getattr(args, "allow_admin_until", None):
+        print(f"Admin/Buchhaltung erlaubt bis {args.allow_admin_until}.")
     print("", flush=True)
 
 
@@ -226,6 +235,7 @@ def run_existing_planner(args: argparse.Namespace, target_day: date, planning_st
                 calendar_id,
                 marker=WEEK_AUTO_EVENT_MARKER,
                 not_before=planning_start,
+                not_after=datetime.combine(target_day, parse_cli_hhmm(args.until)) if getattr(args, "until", None) else None,
             )
         except GoogleCalendarReadError as exc:
             print(f"Tagesplanung gewinnt: Wochenplan-Events konnten nicht entfernt werden ({exc}).")
@@ -248,6 +258,12 @@ def run_existing_planner(args: argparse.Namespace, target_day: date, planning_st
 
     if planning_start is not None:
         command.extend(["--start-time", planning_start.strftime("%H:%M")])
+    if getattr(args, "until", None):
+        command.extend(["--until", args.until])
+    if getattr(args, "allow_late", False) or args.mode == "push":
+        command.append("--allow-late")
+    if getattr(args, "allow_admin_until", None):
+        command.extend(["--allow-admin-until", args.allow_admin_until])
 
     if args.command == "write":
         command.extend(["--write-calendar", "--replace-auto-events"])
@@ -974,11 +990,15 @@ def validate_command_day_combination(parser: argparse.ArgumentParser, args: argp
             parser.error("preview/write unterstützen die Zieltage today oder tomorrow.")
         if args.from_now and args.start_time:
             parser.error("Bitte entweder --from-now oder --start-time verwenden, nicht beides.")
-        if args.start_time:
-            try:
-                parse_cli_hhmm(args.start_time)
-            except ValueError:
-                parser.error("--start-time muss im Format HH:MM angegeben werden.")
+        for attr, label in (("start_time", "--start-time"), ("until", "--until"), ("allow_admin_until", "--allow-admin-until")):
+            value = getattr(args, attr, None)
+            if value:
+                try:
+                    parse_cli_hhmm(value)
+                except ValueError:
+                    parser.error(f"{label} muss im Format HH:MM angegeben werden.")
+        if args.until and args.allow_admin_until and parse_cli_hhmm(args.allow_admin_until) > parse_cli_hhmm(args.until):
+            parser.error("--allow-admin-until darf nicht später als --until sein.")
     if args.command == "review":
         try:
             target_date_for(args.day)
