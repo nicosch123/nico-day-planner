@@ -36,7 +36,8 @@ CALENDAR_PATH = ROOT / "data" / "example_calendar.json"
 
 DAY_START = time(9, 0)
 DAY_END = time(23, 0)
-MAX_PLANNED_PERCENT = 70
+NORMAL_MAX_PLANNED_PERCENT = 75
+PUSH_MAX_PLANNED_PERCENT = 90
 LONG_TASK_THRESHOLD_MINUTES = 120
 DEFAULT_ESTIMATED_DURATION_MINUTES = 30
 DEFAULT_BUFFER_MINUTES = 15
@@ -191,8 +192,17 @@ class RejectedTask:
 @dataclass(frozen=True)
 class PlanOptions:
     day_end: time = DAY_END
+    push: bool = False
     allow_late: bool = False
     admin_until: time | None = None
+
+    @property
+    def push_mode(self) -> bool:
+        return self.push or self.allow_late
+
+    @property
+    def max_planned_percent(self) -> int:
+        return PUSH_MAX_PLANNED_PERCENT if self.push_mode else NORMAL_MAX_PLANNED_PERCENT
 
 
 @dataclass
@@ -602,7 +612,7 @@ def violates_time_rule(task: Task, start: datetime, end: datetime, blocks: list[
         and not (is_lesson_gap(start, end, blocks) and is_lesson_gap_task(task))
     ):
         return "Nicht-Werkstatt-Aufgaben werden nicht in die bevorzugte Werkstattzeit gestreut."
-    admin_latest_end = options.admin_until or (options.day_end if options.allow_late else BUCHHALTUNG_LATEST_END)
+    admin_latest_end = options.admin_until or (options.day_end if options.push_mode else BUCHHALTUNG_LATEST_END)
     if task.category == "Buchhaltung" and end.time() > admin_latest_end:
         return f"Buchhaltung/Admin/Krankenkasse wird nicht nach {admin_latest_end:%H:%M} Uhr geplant."
     if is_werkstatt_diagnosis(task) and end.time() > WERKSTATT_DIAGNOSIS_LATEST_END:
@@ -787,7 +797,7 @@ def choose_task(
             has_full_workshop_day,
             late_evening_p4_count,
             light_after_large_evening_count,
-            options.allow_late,
+            options.push_mode,
         ):
             continue
         fitting.append(candidate)
@@ -1020,13 +1030,15 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
             warnings.append(
                 f"Planung für heute ab {fmt(planning_start)}. Frühere Zeitfenster werden nicht mehr beplant."
             )
+    if options.push_mode:
+        warnings.append("Push-Modus aktiv: erhöhte Tageslast erlaubt.")
     if options.allow_late:
-        warnings.append("Späte Planung durch --allow-late erlaubt.")
+        warnings.append("Hinweis: --allow-late ist veraltet. Bitte künftig --push verwenden.")
     if options.admin_until is not None:
         warnings.append(f"Admin/Buchhaltung durch Override bis {options.admin_until:%H:%M} erlaubt.")
     free_windows = find_free_windows(target_day, hard_blockers, planning_start, options.day_end)
     free_minutes = sum(window.minutes for window in free_windows)
-    capacity_minutes = int(free_minutes * MAX_PLANNED_PERCENT / 100)
+    capacity_minutes = int(free_minutes * options.max_planned_percent / 100)
 
     split_suggestions = [
         RejectedTask(task, rejection_reason(task, fixed_blocks))
@@ -1406,7 +1418,12 @@ def is_restday_start_warning(warning: str) -> bool:
 
 
 def is_context_warning(warning: str) -> bool:
-    return is_restday_start_warning(warning) or warning.startswith("Späte Planung durch --allow-late") or warning.startswith("Admin/Buchhaltung durch Override")
+    return (
+        is_restday_start_warning(warning)
+        or warning.startswith("Push-Modus aktiv")
+        or warning.startswith("Hinweis: --allow-late ist veraltet")
+        or warning.startswith("Admin/Buchhaltung durch Override")
+    )
 
 def plan_status(plan: PlanResult) -> str:
     if plan.validation_errors or plan.calendar_write_blocked_warning:
@@ -1537,11 +1554,15 @@ def render_plan(plan: PlanResult) -> str:
     lines.append(f"- Geplant wird nur zwischen 09:00 und {plan.plan_options.day_end:%H:%M} Uhr.")
     if plan.plan_options.day_end != DAY_END:
         lines.append(f"- Ausnahme aktiv: Planung bis {plan.plan_options.day_end:%H:%M} erlaubt.")
+    if plan.plan_options.push_mode:
+        lines.append("- Push-Modus aktiv: erhöhte Tageslast erlaubt.")
+        lines.append(f"- Planung bis {plan.plan_options.day_end:%H:%M} erlaubt.")
     if plan.plan_options.allow_late:
-        lines.append("- Ausnahme aktiv: späte Planung durch --allow-late erlaubt.")
+        lines.append("- Hinweis: --allow-late ist veraltet. Bitte künftig --push verwenden.")
     if plan.plan_options.admin_until is not None:
         lines.append(f"- Admin/Buchhaltung erlaubt bis {plan.plan_options.admin_until:%H:%M}.")
-    lines.append(f"- Freie Zeit: {free_minutes} Minuten; davon maximal 70 Prozent verplant: {plan.capacity_minutes} Minuten.")
+    lines.append(f"- Auslastungslimit: {plan.plan_options.max_planned_percent}%")
+    lines.append(f"- Freie Zeit: {free_minutes} Minuten; davon maximal {plan.plan_options.max_planned_percent} Prozent verplant: {plan.capacity_minutes} Minuten.")
     lines.append("- Maximal 6 Hauptaufgaben und 2 Mini-Tasks werden automatisch eingeplant.")
     lines.append("")
 
@@ -1694,7 +1715,8 @@ def parse_args() -> argparse.Namespace:
         help="Früheste Planungszeit am Zieltag im Format HH:MM; schützt bei today vor Planung in die Vergangenheit.",
     )
     parser.add_argument("--until", help="Späteste Planungsgrenze im Format HH:MM. Keine Auto-Events enden danach.")
-    parser.add_argument("--allow-late", action="store_true", help="Abend- und Tageslastregeln für diesen Lauf lockern.")
+    parser.add_argument("--push", action="store_true", help="Push-Modus: 90%% Auslastung, späte Planung und gelockerte Abend-/Admin-Regeln.")
+    parser.add_argument("--allow-late", action="store_true", help="Veraltet: Alias für --push.")
     parser.add_argument("--allow-admin-until", help="Admin/Buchhaltung bis zu dieser Uhrzeit im Format HH:MM erlauben.")
     args = parser.parse_args()
     for attr, label in (("start_time", "--start-time"), ("until", "--until"), ("allow_admin_until", "--allow-admin-until")):
@@ -1715,6 +1737,7 @@ def main() -> None:
     planning_start = datetime.combine(target_day, parse_hhmm(args.start_time)) if args.start_time else None
     options = PlanOptions(
         day_end=parse_hhmm(args.until) if args.until else DAY_END,
+        push=args.push,
         allow_late=args.allow_late,
         admin_until=parse_hhmm(args.allow_admin_until) if args.allow_admin_until else None,
     )

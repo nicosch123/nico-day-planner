@@ -695,6 +695,129 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         assert late is not None
         self.assertEqual(late.id, "admin-1")
 
+
+    def test_normal_day_planning_uses_75_percent_capacity(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [Task("t1", "Normalblock", "Privat", "P1", 30)],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: ([], "test", False, [], (), [])
+            plan = build_plan(
+                "todoist",
+                date(2026, 7, 18),
+                "google",
+                planning_start=datetime(2026, 7, 18, 16, 0),
+                options=dry_run_plan.PlanOptions(day_end=planner.parse_cli_hhmm("23:00")),
+            )
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        self.assertEqual(plan.capacity_minutes, 315)
+        self.assertIn("Auslastungslimit: 75%", dry_run_plan.render_plan(plan))
+
+    def test_push_day_planning_uses_90_percent_capacity(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [Task("t1", "Pushblock", "Privat", "P1", 30)],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: ([], "test", False, [], (), [])
+            plan = build_plan(
+                "todoist",
+                date(2026, 7, 18),
+                "google",
+                planning_start=datetime(2026, 7, 18, 16, 0),
+                options=dry_run_plan.PlanOptions(day_end=planner.parse_cli_hhmm("23:00"), push=True),
+            )
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        rendered = dry_run_plan.render_plan(plan)
+        self.assertEqual(plan.capacity_minutes, 378)
+        self.assertIn("Push-Modus aktiv: erhöhte Tageslast erlaubt.", rendered)
+        self.assertIn("Auslastungslimit: 90%", rendered)
+        self.assertIn("Planung bis 23:00 erlaubt.", rendered)
+
+    def test_push_until_23_allows_late_tasks_without_passing_until(self) -> None:
+        original_load_tasks = dry_run_plan.load_tasks_for_source
+        original_load_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (
+                [
+                    Task("a", "Erster Abendblock", "Privat", "P1", 120),
+                    Task("b", "Späte Buchhaltung", "Buchhaltung", "P2", 60),
+                    Task("c", "Späte Kleinigkeit", "Haushalt", "P4", 15),
+                ],
+                "test",
+                False,
+                [],
+                (),
+            )
+            dry_run_plan.load_calendar_blocks_for_source = lambda _calendar_source, _target_day: ([], "test", False, [], (), [])
+            plan = build_plan(
+                "todoist",
+                date(2026, 7, 18),
+                "google",
+                planning_start=datetime(2026, 7, 18, 19, 30),
+                options=dry_run_plan.PlanOptions(day_end=planner.parse_cli_hhmm("23:00"), push=True),
+            )
+        finally:
+            dry_run_plan.load_tasks_for_source = original_load_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_load_calendar
+
+        titles = [block.task.title for block in plan.planned_blocks]
+        self.assertIn("Späte Buchhaltung", titles)
+        self.assertTrue(all(block.end <= datetime(2026, 7, 18, 23, 0) for block in plan.planned_blocks))
+
+    def test_allow_late_alias_enables_push_and_deprecation_message(self) -> None:
+        options = dry_run_plan.PlanOptions(day_end=planner.parse_cli_hhmm("23:00"), allow_late=True)
+        self.assertTrue(options.push_mode)
+        self.assertEqual(options.max_planned_percent, 90)
+        parser = planner.build_parser()
+        args = parser.parse_args(["preview", "today", "--until", "23:00", "--push", "--allow-late"])
+        planner.validate_command_day_combination(parser, args)
+        self.assertTrue(args.push)
+        self.assertTrue(args.allow_late)
+
+
+    def test_quality_uses_push_capacity_without_density_penalty(self) -> None:
+        target = date(2026, 7, 18)
+        plan = PlanResult(
+            target_day=target,
+            source_status="test",
+            fixed_blocks=[],
+            free_windows=[TimeWindow(datetime(2026, 7, 18, 16, 0), datetime(2026, 7, 18, 23, 0))],
+            planned_blocks=[PlannedBlock(Task("p", "Dichter Pushblock", "Privat", "P1", 360), datetime(2026, 7, 18, 16, 0), datetime(2026, 7, 18, 22, 0))],
+            not_scheduled=[],
+            split_suggestions=[],
+            capacity_minutes=378,
+            planned_minutes=360,
+            source="todoist",
+            calendar_source="google",
+            calendar_status="test",
+            warnings=["Push-Modus aktiv: erhöhte Tageslast erlaubt."],
+            plan_options=dry_run_plan.PlanOptions(day_end=planner.parse_cli_hhmm("23:00"), push=True),
+        )
+
+        quality, reasons = dry_run_plan.plan_quality_details(plan)
+
+        self.assertGreaterEqual(quality, 8)
+        self.assertIn("Push-Modus aktiv: erhöhte Tageslast erlaubt.", reasons)
+        self.assertNotIn("Geplante Zeit überschreitet Kapazitätslimit", reasons)
+
     def test_cli_rejects_invalid_until_and_admin_until(self) -> None:
         parser = planner.build_parser()
         with self.assertRaises(SystemExit):
