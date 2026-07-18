@@ -126,7 +126,8 @@ def build_parser() -> argparse.ArgumentParser:
             help="Manueller Endzeitpunkt, z. B. 21:00. Wird in Phase 1 angezeigt und als NICO_PLANNER_TO übergeben.",
         )
         day_parser.add_argument("--until", help="Späteste Planungsgrenze im Format HH:MM; keine Auto-Events enden danach.")
-        day_parser.add_argument("--allow-late", action="store_true", help="Abend- und Tageslastregeln für diesen Lauf lockern.")
+        day_parser.add_argument("--push", action="store_true", help="Push-Modus: 90%% Auslastung, späte Planung und gelockerte Abend-/Admin-Regeln.")
+        day_parser.add_argument("--allow-late", action="store_true", help="Veraltet: Alias für --push.")
         day_parser.add_argument("--allow-admin-until", help="Admin/Buchhaltung bis zu dieser Uhrzeit im Format HH:MM erlauben.")
 
     for command in ("preview", "write", "review"):
@@ -205,10 +206,13 @@ def print_header(args: argparse.Namespace, target_day: date, planning_start: dat
         start = args.from_time or "nicht gesetzt"
         end = args.to_time or "nicht gesetzt"
         print(f"Manueller Zeitraum: {start}–{end}")
+    push_mode = getattr(args, "push", False) or getattr(args, "allow_late", False) or getattr(args, "mode", "") == "push"
     if getattr(args, "until", None):
-        print(f"Ausnahme aktiv: Planung bis {args.until} erlaubt.")
-    if getattr(args, "allow_late", False) or getattr(args, "mode", "") == "push":
-        print("Ausnahme aktiv: späte Planung erlaubt.")
+        print(f"Planung bis {args.until} erlaubt.")
+    if push_mode:
+        print("Push-Modus aktiv: erhöhte Tageslast erlaubt.")
+    if getattr(args, "allow_late", False):
+        print("Hinweis: --allow-late ist veraltet. Bitte künftig --push verwenden.")
     if getattr(args, "allow_admin_until", None):
         print(f"Admin/Buchhaltung erlaubt bis {args.allow_admin_until}.")
     print("", flush=True)
@@ -260,7 +264,9 @@ def run_existing_planner(args: argparse.Namespace, target_day: date, planning_st
         command.extend(["--start-time", planning_start.strftime("%H:%M")])
     if getattr(args, "until", None):
         command.extend(["--until", args.until])
-    if getattr(args, "allow_late", False) or args.mode == "push":
+    if getattr(args, "push", False) or args.mode == "push":
+        command.append("--push")
+    if getattr(args, "allow_late", False):
         command.append("--allow-late")
     if getattr(args, "allow_admin_until", None):
         command.extend(["--allow-admin-until", args.allow_admin_until])
