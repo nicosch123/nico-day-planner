@@ -51,10 +51,13 @@ LESSON_GAP_PREFERRED_MAX_MINUTES = 45
 LESSON_GAP_CATEGORIES = {"Soundwerk", "Buchhaltung", "Privat", "Haushalt", "ALEGRA", "Studio"}
 MAX_MAIN_TASKS = 6
 MAX_MINI_TASKS = 2
+PUSH_MAX_MAIN_TASKS = 8
+PUSH_MAX_MINI_TASKS = 3
 MINI_TASK_MAX_MINUTES = 15
 WERKSTATT_GAP_MINUTES = 30
 WERKSTATT_PARTIAL_BLOCK_MINUTES = 60
 MAX_PARTIAL_BLOCKS_PER_DAY = 2
+PUSH_MAX_PARTIAL_BLOCKS_PER_DAY = 4
 EVENING_START = time(17, 0)
 EVENING_PROTECTED_END = time(19, 30)
 LATE_EVENING_START = time(19, 0)
@@ -146,6 +149,7 @@ class Task:
     notes: str = ""
     parent_id: str = ""
     parent_title: str = ""
+    due_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -204,6 +208,18 @@ class PlanOptions:
     def max_planned_percent(self) -> int:
         return PUSH_MAX_PLANNED_PERCENT if self.push_mode else NORMAL_MAX_PLANNED_PERCENT
 
+    @property
+    def max_main_tasks(self) -> int:
+        return PUSH_MAX_MAIN_TASKS if self.push_mode else MAX_MAIN_TASKS
+
+    @property
+    def max_mini_tasks(self) -> int:
+        return PUSH_MAX_MINI_TASKS if self.push_mode else MAX_MINI_TASKS
+
+    @property
+    def max_partial_blocks(self) -> int:
+        return PUSH_MAX_PARTIAL_BLOCKS_PER_DAY if self.push_mode else MAX_PARTIAL_BLOCKS_PER_DAY
+
 
 @dataclass
 class PlanResult:
@@ -237,6 +253,9 @@ class PlanResult:
     planning_start: datetime | None = None
     plan_options: PlanOptions = field(default_factory=PlanOptions)
     open_task_context: tuple[str, ...] = field(default_factory=tuple)
+    main_focus_count: int = 0
+    mini_task_count: int = 0
+    partial_block_count: int = 0
 
 
 def parse_hhmm(value: str) -> time:
@@ -276,6 +295,13 @@ def normalize_task(raw: dict[str, Any]) -> Task:
     parent_id = str(raw.get("parent_id", ""))
     parent_title = str(raw.get("parent_title", ""))
     title = str(raw.get("title", "Ohne Titel"))
+    raw_due = raw.get("due_date") or raw.get("deadline")
+    due_date = None
+    if raw_due:
+        try:
+            due_date = date.fromisoformat(str(raw_due)[:10])
+        except ValueError:
+            due_date = None
     if parent_id and parent_title:
         title = task_title_with_parent(parent_title, title)
     return Task(
@@ -289,6 +315,7 @@ def normalize_task(raw: dict[str, Any]) -> Task:
         notes=str(raw.get("notes", "")),
         parent_id=parent_id,
         parent_title=parent_title,
+        due_date=due_date,
     )
 
 
@@ -707,7 +734,21 @@ def violates_evening_load_rule(
     return None
 
 
-def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int, int, str]:
+def urgency_rank(task: Task, target_day: date) -> int:
+    """Combine deadline urgency and Todoist priority without starving urgent P2/P3 work."""
+    days_until_due = (task.due_date - target_day).days if task.due_date else None
+    if days_until_due is not None and days_until_due <= 0 and task.priority in {"P1", "P2", "P3"}:
+        return 0
+    if days_until_due == 1 and task.priority in {"P1", "P2", "P3"}:
+        return 1
+    if task.priority in {"P1", "P2"}:
+        return 2
+    if days_until_due is not None and days_until_due <= 1:
+        return 3
+    return 4 if task.priority == "P3" else 5
+
+
+def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int, int, int, str]:
     priority_rank = PRIORITY_ORDER.get(task.priority, 99)
     evening_bonus = 0
     if task.category == "Buchhaltung" and slot_start.time() >= time(18, 0):
@@ -715,6 +756,7 @@ def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int,
     household_penalty = 1 if task.category == "Haushalt" and task.duration_minutes > 15 else 0
     werkstatt_small_bonus = -1 if is_preferred_small_werkstatt_task(task) else 0
     return (
+        urgency_rank(task, slot_start.date()),
         priority_rank + evening_bonus,
         household_penalty + werkstatt_small_bonus,
         task.duration_minutes,
@@ -722,6 +764,22 @@ def task_sort_key(task: Task, slot_start: datetime) -> tuple[int, int, int, int,
         0 if task.category == "Werkstatt" else 1,
         task.title,
     )
+
+
+def normalized_parent_prefix(title: str) -> str:
+    return title.split(":", 1)[0].strip().casefold() if ":" in title else ""
+
+
+def task_focus_key(task: Task) -> str:
+    """Return the project focus charged against the main-task limit."""
+    if task.parent_title:
+        return f"parent:{task.parent_title.strip().casefold()}"
+    if task.parent_id:
+        return f"parent-id:{task.parent_id}"
+    prefix = normalized_parent_prefix(task.title)
+    if prefix:
+        return f"parent:{prefix}"
+    return f"task:{task.id}"
 
 
 def is_partial_task(task: Task) -> bool:
@@ -734,7 +792,7 @@ def choose_task(
     slot_end: datetime,
     remaining_capacity: int,
     blocks: list[Block],
-    main_count: int,
+    main_focus_keys: set[str] | int,
     mini_count: int,
     large_evening_count: int,
     partial_count: int,
@@ -746,13 +804,16 @@ def choose_task(
     options: PlanOptions | None = None,
 ) -> Task | None:
     options = options or PlanOptions()
+    if isinstance(main_focus_keys, int):
+        # Backward-compatible for direct callers of the former count-based API.
+        main_focus_keys = {f"legacy-focus:{index}" for index in range(main_focus_keys)}
     fitting: list[Task] = []
     gap_minutes = int((slot_end - slot_start).total_seconds() // 60)
     lesson_gap = is_lesson_gap(slot_start, slot_end, blocks)
     for task in tasks:
-        if is_mini_task(task) and mini_count >= MAX_MINI_TASKS:
+        if is_mini_task(task) and mini_count >= options.max_mini_tasks:
             continue
-        if not is_mini_task(task) and main_count >= MAX_MAIN_TASKS:
+        if not is_mini_task(task) and task_focus_key(task) not in main_focus_keys and len(main_focus_keys) >= options.max_main_tasks:
             continue
         candidate = task
         fitting_minutes = gap_minutes
@@ -771,7 +832,7 @@ def choose_task(
                 and task.duration_minutes >= WERKSTATT_GAP_MINUTES
                 and fitting_minutes >= WERKSTATT_GAP_MINUTES
                 and remaining_capacity >= WERKSTATT_GAP_MINUTES
-                and (task.id in (split_task_ids or set()) or partial_count < MAX_PARTIAL_BLOCKS_PER_DAY)
+                and partial_count < options.max_partial_blocks
                 and is_safely_partial_werkstatt_task(task)
             ):
                 partial_minutes = min(WERKSTATT_PARTIAL_BLOCK_MINUTES, fitting_minutes, remaining_capacity)
@@ -809,7 +870,11 @@ def choose_task(
         short_high_priority = [
             task
             for task in fitting
-            if task.priority in {"P1", "P2"} and task.duration_minutes <= gap_minutes
+            if (
+                task.priority in {"P1", "P2"}
+                or (task.due_date is not None and (task.due_date - slot_start.date()).days <= 1)
+            )
+            and task.duration_minutes <= gap_minutes
         ]
         if short_high_priority:
             return sorted(short_high_priority, key=lambda task: task_sort_key(task, slot_start))[0]
@@ -914,6 +979,9 @@ def build_load_diagnostics(
     large_evening_count: int,
     partial_count: int,
     has_full_workshop_day: bool,
+    options: PlanOptions,
+    main_focus_keys: set[str],
+    mini_count: int,
 ) -> list[str]:
     diagnostics: list[str] = []
     if has_full_workshop_day:
@@ -923,9 +991,16 @@ def build_load_diagnostics(
     diagnostics.append(
         f"Große Abendblöcke nach 19:30: {large_evening_count}/{MAX_LARGE_EVENING_BLOCKS} automatisch eingeplant."
     )
-    diagnostics.append(f"Teilblock-Limit: {partial_count}/{MAX_PARTIAL_BLOCKS_PER_DAY} Teilblock(en) genutzt.")
-    if partial_count >= MAX_PARTIAL_BLOCKS_PER_DAY:
-        diagnostics.append("Teilblock-Limit erreicht: weitere passende Aufgaben werden nicht als „Teil 1“ eingeplant.")
+    diagnostics.append(f"Hauptfokus: {len(main_focus_keys)}/{options.max_main_tasks}.")
+    diagnostics.append(f"Mini-Tasks: {mini_count}/{options.max_mini_tasks}.")
+    if options.push_mode:
+        diagnostics.append(f"Push-Modus aktiv: Teilblock-Limit {options.max_partial_blocks}. Genutzt: {partial_count}/{options.max_partial_blocks}.")
+    else:
+        diagnostics.append(f"Teilblock-Limit: {partial_count}/{options.max_partial_blocks}.")
+    if partial_count >= options.max_partial_blocks:
+        diagnostics.append(
+            f"Teilblock-Limit erreicht: {partial_count}/{options.max_partial_blocks}. Weitere teilbare Werkstattaufgaben wurden nicht eingeplant."
+        )
 
     deferred_evening_tasks = [
         task
@@ -1049,7 +1124,7 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
 
     planned_blocks: list[PlannedBlock] = []
     planned_minutes = 0
-    main_count = 0
+    main_focus_keys: set[str] = set()
     mini_count = 0
     large_evening_count = 0
     late_evening_p4_count = 0
@@ -1072,7 +1147,7 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
                 window.end,
                 capacity_minutes - planned_minutes,
                 fixed_blocks,
-                main_count,
+                main_focus_keys,
                 mini_count,
                 large_evening_count,
                 partial_count,
@@ -1101,7 +1176,7 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
             if is_mini_task(task):
                 mini_count += 1
             else:
-                main_count += 1
+                main_focus_keys.add(task_focus_key(task))
             had_large_evening_before_task = large_evening_count >= MAX_LARGE_EVENING_BLOCKS
             if is_large_evening_task(task, cursor):
                 large_evening_count += 1
@@ -1119,7 +1194,7 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
             if is_partial_task(task):
                 if task.id not in split_task_ids:
                     split_task_ids.add(task.id)
-                    partial_count += 1
+                partial_count += 1
                 split_part_numbers[task.id] = split_part_numbers.get(task.id, 0) + 1
                 if split_part_numbers[task.id] > 1:
                     partial_diagnostics.append(f"Fortsetzung von Teilblock: {original_task.title}.")
@@ -1134,6 +1209,9 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
                         estimated=original_task.estimated,
                         duration_source=original_task.duration_source,
                         notes=original_task.notes,
+                        parent_id=original_task.parent_id,
+                        parent_title=original_task.parent_title,
+                        due_date=original_task.due_date,
                     )
                 else:
                     remaining_tasks.remove(original_task)
@@ -1143,7 +1221,20 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
 
     not_scheduled = [RejectedTask(task, rejection_reason(task, fixed_blocks)) for task in remaining_tasks]
     workshop_diagnostics = build_workshop_diagnostics(target_day, fixed_blocks, planned_blocks, remaining_tasks)
-    load_diagnostics = build_load_diagnostics(planned_blocks, remaining_tasks, large_evening_count, partial_count, has_full_workshop_day)
+    load_diagnostics = build_load_diagnostics(
+        planned_blocks, remaining_tasks, large_evening_count, partial_count, has_full_workshop_day,
+        options, main_focus_keys, mini_count,
+    )
+    focus_blocks: dict[str, list[PlannedBlock]] = {}
+    for block in planned_blocks:
+        if not is_mini_task(block.task):
+            focus_blocks.setdefault(task_focus_key(block.task), []).append(block)
+    for blocks_for_focus in focus_blocks.values():
+        if len(blocks_for_focus) > 1:
+            focus_title = blocks_for_focus[0].task.parent_title or normalized_parent_prefix(blocks_for_focus[0].task.title) or blocks_for_focus[0].task.title
+            load_diagnostics.append(
+                f"Projektfokus {focus_title}: {len(blocks_for_focus)} Blöcke zählen als 1 Hauptfokus."
+            )
     if split_task_ids:
         continuation_count = sum(1 for parts in split_part_numbers.values() if parts > 1)
         load_diagnostics.append(f"{len(split_task_ids)} Aufgabe(n) in Teilblöcken geplant; {continuation_count} davon fortgesetzt.")
@@ -1178,6 +1269,9 @@ def build_plan(source: str, target_day: date, calendar_source: str, planning_sta
         planning_start=planning_start,
         plan_options=options,
         open_task_context=tuple(open_task_context_for(not_scheduled + split_suggestions, fixed_blocks, free_windows, options)),
+        main_focus_count=len(main_focus_keys),
+        mini_task_count=mini_count,
+        partial_block_count=partial_count,
     )
 
 
@@ -1473,6 +1567,8 @@ def plan_quality_details(plan: PlanResult) -> tuple[int, list[str]]:
         reasons.append("Buchhaltungs-/Admin-Aufgaben wären im erlaubten Zeitfenster möglich gewesen")
     if any(item.task.category == "Werkstatt" for item in contextual_high):
         reasons.append("Werkstattaufgaben offen, aber kein passendes Werkstattfenster im betrachteten Planungszeitraum")
+    if plan.plan_options.push_mode and plan.planned_minutes < plan.capacity_minutes and actionable_high:
+        reasons.append("Push-Kapazität nicht ausgeschöpft, obwohl passende P1/P2-Aufgaben offen blieben")
     return max(0, min(10, score)), list(dict.fromkeys(reasons))
 
 
@@ -1563,7 +1659,13 @@ def render_plan(plan: PlanResult) -> str:
         lines.append(f"- Admin/Buchhaltung erlaubt bis {plan.plan_options.admin_until:%H:%M}.")
     lines.append(f"- Auslastungslimit: {plan.plan_options.max_planned_percent}%")
     lines.append(f"- Freie Zeit: {free_minutes} Minuten; davon maximal {plan.plan_options.max_planned_percent} Prozent verplant: {plan.capacity_minutes} Minuten.")
-    lines.append("- Maximal 6 Hauptaufgaben und 2 Mini-Tasks werden automatisch eingeplant.")
+    lines.append(f"- Hauptaufgabenlimit: {plan.plan_options.max_main_tasks} Hauptfokus/-foki.")
+    lines.append(f"- Mini-Task-Limit: {plan.plan_options.max_mini_tasks}.")
+    lines.append(f"- Teilblocklimit: {plan.plan_options.max_partial_blocks}.")
+    lines.append(f"- Aktive Aufgabenzeit: {plan.planned_minutes}/{plan.capacity_minutes} Min.")
+    lines.append(f"- Hauptfokus: {plan.main_focus_count}/{plan.plan_options.max_main_tasks}.")
+    lines.append(f"- Mini-Tasks: {plan.mini_task_count}/{plan.plan_options.max_mini_tasks}.")
+    lines.append(f"- Teilblöcke: {plan.partial_block_count}/{plan.plan_options.max_partial_blocks}.")
     lines.append("")
 
     lines.append("## Quellenstatus")
