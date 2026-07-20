@@ -113,9 +113,15 @@ prioritization:
   schedule_p1_first: true
 
 capacity:
-  max_free_time_planned_percent: 70
+  max_free_time_planned_percent: 75
   max_main_tasks: 6
   max_mini_tasks: 2
+  max_partial_blocks: 2
+  push:
+    max_free_time_planned_percent: 90
+    max_main_tasks: 8
+    max_mini_tasks: 3
+    max_partial_blocks: 4
   mini_task_max_minutes: 15
   include_daily_buffers: true
   default_buffer_minutes: 15

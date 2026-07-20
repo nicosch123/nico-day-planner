@@ -290,6 +290,12 @@ def normalize_todoist_task(
     parent_id = task.get("parent_id")
     if parent_id:
         normalized["parent_id"] = str(parent_id)
+    due = task.get("due")
+    if isinstance(due, dict) and due.get("date"):
+        normalized["due_date"] = str(due["date"])[:10]
+    deadline = task.get("deadline")
+    if isinstance(deadline, dict) and deadline.get("date"):
+        normalized["deadline"] = str(deadline["date"])[:10]
     if description:
         normalized["notes"] = str(description)
     if project_name:

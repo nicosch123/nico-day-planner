@@ -33,6 +33,102 @@ from todoist_client import enrich_subtask_titles  # noqa: E402
 
 
 class PlannerValidationRegressionTest(unittest.TestCase):
+    def test_push_mode_uses_expanded_structural_limits(self) -> None:
+        normal = dry_run_plan.PlanOptions()
+        push = dry_run_plan.PlanOptions(push=True)
+
+        self.assertEqual((normal.max_planned_percent, normal.max_main_tasks, normal.max_mini_tasks, normal.max_partial_blocks), (75, 6, 2, 2))
+        self.assertEqual((push.max_planned_percent, push.max_main_tasks, push.max_mini_tasks, push.max_partial_blocks), (90, 8, 3, 4))
+
+    def test_parent_id_and_title_prefix_share_one_project_focus(self) -> None:
+        by_id = Task("child-1", "Heizkreis", "Werkstatt", "P1", 30, parent_id="parent-1")
+        by_same_id = Task("child-4", "Trafo", "Werkstatt", "P1", 30, parent_id="parent-1")
+        by_title = Task("child-2", "Heizkreis", "Werkstatt", "P1", 30, parent_title="Echolette NG51")
+        by_prefix = Task("child-3", "Echolette NG51: Dokumentation", "Werkstatt", "P1", 30)
+
+        self.assertEqual(dry_run_plan.task_focus_key(by_id), dry_run_plan.task_focus_key(by_same_id))
+        self.assertEqual(dry_run_plan.task_focus_key(by_title), dry_run_plan.task_focus_key(by_prefix))
+
+    def test_parent_project_blocks_count_minutes_but_only_one_focus(self) -> None:
+        target = date(2026, 7, 19)
+        tasks = [
+            Task("child-1", "Echolette NG51: Dokumentation", "Privat", "P1", 30, parent_id="parent-1", parent_title="Echolette NG51"),
+            Task("child-2", "Echolette NG51: Heizkreis", "Privat", "P1", 30, parent_id="parent-1", parent_title="Echolette NG51"),
+        ]
+        original_tasks = dry_run_plan.load_tasks_for_source
+        original_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: (tasks, "test", False, [], ())
+            dry_run_plan.load_calendar_blocks_for_source = lambda _source, _day: ([], "test", False, [], (), [])
+            plan = build_plan("todoist", target, "google")
+        finally:
+            dry_run_plan.load_tasks_for_source = original_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_calendar
+
+        self.assertEqual(plan.planned_minutes, 60)
+        self.assertEqual(plan.main_focus_count, 1)
+        self.assertIn("2 Blöcke zählen als 1 Hauptfokus", "\n".join(plan.load_diagnostics))
+
+    def test_due_p3_can_precede_undated_p1(self) -> None:
+        target = date(2026, 7, 20)
+        chosen = dry_run_plan.choose_task(
+            [Task("p1", "Wichtig ohne Frist", "Privat", "P1", 30), Task("p3", "Heute fällig", "Privat", "P3", 30, due_date=target)],
+            datetime(2026, 7, 20, 19, 30), datetime(2026, 7, 20, 20, 0), 30, [], set(), 0, 0, 0, set(), {}, False, 0, 0,
+            dry_run_plan.PlanOptions(push=True),
+        )
+        self.assertEqual(chosen.id, "p3")
+
+    def test_push_prefers_p1_partial_over_undated_p3(self) -> None:
+        chosen = dry_run_plan.choose_task(
+            [Task("p3", "Niedriger Füller", "Werkstatt", "P3", 30), Task("p1", "Echolette Fehlersuche", "Werkstatt", "P1", 90)],
+            datetime(2026, 7, 20, 10, 0), datetime(2026, 7, 20, 11, 0), 60, dry_run_plan.weekly_blocks(date(2026, 7, 20)),
+            set(), 0, 0, 0, set(), {}, True, 0, 0, dry_run_plan.PlanOptions(push=True),
+        )
+        self.assertEqual(chosen.id, "p1")
+        self.assertTrue(dry_run_plan.is_partial_task(chosen))
+
+    def test_p4_mini_task_remains_a_filler_when_high_priority_task_cannot_fit(self) -> None:
+        chosen = dry_run_plan.choose_task(
+            [Task("p1", "Wichtiger großer Block", "Privat", "P1", 30), Task("p4", "Müll rausbringen", "Haushalt", "P4", 15)],
+            datetime(2026, 7, 20, 20, 0), datetime(2026, 7, 20, 20, 15), 15, [], set(), 0, 0, 0, set(), {}, False, 0, 0,
+            dry_run_plan.PlanOptions(push=True),
+        )
+        self.assertEqual(chosen.id, "p4")
+
+    def test_push_capacity_is_a_ceiling_not_a_fill_target(self) -> None:
+        target = date(2026, 7, 19)
+        original_tasks = dry_run_plan.load_tasks_for_source
+        original_calendar = dry_run_plan.load_calendar_blocks_for_source
+        try:
+            dry_run_plan.load_tasks_for_source = lambda _source: ([Task("only", "Einzige Aufgabe", "Privat", "P1", 30)], "test", False, [], ())
+            dry_run_plan.load_calendar_blocks_for_source = lambda _source, _day: ([], "test", False, [], (), [])
+            plan = build_plan("todoist", target, "google", options=dry_run_plan.PlanOptions(push=True))
+        finally:
+            dry_run_plan.load_tasks_for_source = original_tasks
+            dry_run_plan.load_calendar_blocks_for_source = original_calendar
+
+        self.assertEqual(plan.planned_minutes, 30)
+        self.assertGreater(plan.capacity_minutes, plan.planned_minutes)
+
+    def test_push_preview_and_quality_explain_unused_actionable_capacity(self) -> None:
+        target = date(2026, 7, 20)
+        open_task = Task("open", "Passende wichtige Aufgabe", "Privat", "P1", 30)
+        plan = PlanResult(
+            target_day=target, source_status="test", fixed_blocks=[],
+            free_windows=[TimeWindow(datetime(2026, 7, 20, 19, 30), datetime(2026, 7, 20, 21, 30))],
+            planned_blocks=[], not_scheduled=[RejectedTask(open_task, "offen")], split_suggestions=[],
+            capacity_minutes=108, planned_minutes=0, source="test", calendar_source="json", calendar_status="test",
+            plan_options=dry_run_plan.PlanOptions(push=True), main_focus_count=0, mini_task_count=0, partial_block_count=0,
+        )
+
+        rendered = dry_run_plan.render_plan(plan)
+        _score, reasons = dry_run_plan.plan_quality_details(plan)
+        self.assertIn("Hauptaufgabenlimit: 8", rendered)
+        self.assertIn("Mini-Task-Limit: 3", rendered)
+        self.assertIn("Teilblocklimit: 4", rendered)
+        self.assertIn("Aktive Aufgabenzeit: 0/108 Min.", rendered)
+        self.assertIn("Push-Kapazität nicht ausgeschöpft", "\n".join(reasons))
+
     def test_review_target_date_supports_relative_days_and_iso_dates(self) -> None:
         today = date.today()
 
