@@ -674,18 +674,29 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         self.assertTrue(any("Planung für heute ab 12:00" in warning for warning in plan.warnings))
 
     def test_from_now_uses_rounded_now_slot_for_today(self) -> None:
-        original_rounded = planner.rounded_now_slot
-        try:
-            planner.rounded_now_slot = lambda: datetime.combine(date.today(), datetime.strptime("12:07", "%H:%M").time())
-            args = argparse.Namespace(command="preview", start_time=None, from_now=True)
-            start = planner.planning_start_for(args, date.today())
-        finally:
-            planner.rounded_now_slot = original_rounded
+        local_now = datetime(2026, 8, 25, 12, 7, tzinfo=planner.LOCAL_TIMEZONE)
+        args = argparse.Namespace(command="preview", start_time=None, from_now=True)
+        start = planner.planning_start_for(args, local_now.date(), local_now=local_now)
 
         self.assertIsNotNone(start)
         assert start is not None
-        self.assertEqual(start.minute, 7)
-        # rounded_now_slot is responsible for rounding; planner uses it as minimum start.
+        self.assertEqual(start, datetime(2026, 8, 25, 12, 15))
+
+    def test_from_now_rounds_1216_to_1230_in_berlin(self) -> None:
+        local_now = datetime(2026, 8, 25, 12, 16, tzinfo=planner.LOCAL_TIMEZONE)
+        args = argparse.Namespace(command="preview", start_time=None, from_now=True)
+
+        start = planner.planning_start_for(args, local_now.date(), local_now=local_now)
+
+        self.assertEqual(start, datetime(2026, 8, 25, 12, 30))
+
+    def test_past_manual_today_start_is_raised_to_current_slot(self) -> None:
+        local_now = datetime(2026, 8, 25, 12, 16, tzinfo=planner.LOCAL_TIMEZONE)
+        args = argparse.Namespace(command="preview", start_time="12:10", from_now=False)
+
+        start = planner.planning_start_for(args, local_now.date(), local_now=local_now)
+
+        self.assertEqual(start, datetime(2026, 8, 25, 12, 30))
 
     def test_restday_quality_treats_workshop_backlog_as_context(self) -> None:
         target_day = date(2026, 7, 18)  # Saturday, no Werkstatt window.
