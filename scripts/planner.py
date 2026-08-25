@@ -18,6 +18,7 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from google_calendar_client import (
     AUTO_EVENT_MARKER,
@@ -65,6 +66,8 @@ EVENING_CHOICES = ("ok", "too_full", "too_late", "not_relevant")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DRY_RUN_PLAN = SCRIPT_DIR / "dry_run_plan.py"
+LOCAL_TIMEZONE_NAME = "Europe/Berlin"
+LOCAL_TIMEZONE = ZoneInfo(LOCAL_TIMEZONE_NAME)
 
 
 DATE_FORMAT_HELP = "Erlaubte Formate: yesterday, today, tomorrow oder YYYY-MM-DD."
@@ -126,15 +129,28 @@ def expand_shortcut(argv: list[str]) -> tuple[list[str], str | None]:
     return expanded, label
 
 
-def print_shortcut_mapping(label: str, expanded: list[str]) -> None:
+def print_shortcut_mapping(
+    label: str,
+    expanded: list[str],
+    local_now: datetime | None = None,
+    planning_start: datetime | None = None,
+) -> None:
     print(f"Shortcut erkannt: {label}")
     print(f"Entspricht: {' '.join(expanded)}")
+    if label.startswith("today") and local_now is not None and planning_start is not None:
+        print(f"Aktuelle lokale Zeit: {local_now:%H:%M} {LOCAL_TIMEZONE_NAME}")
+        print(f"Planungsbeginn: {planning_start:%H:%M}")
     print("")
 
 
-def target_date_for(value: str) -> date:
+def current_local_datetime() -> datetime:
+    """Return the current wall-clock time in the planner's local timezone."""
+    return datetime.now(LOCAL_TIMEZONE)
+
+
+def target_date_for(value: str, today: date | None = None) -> date:
     """Return the concrete target date for a supported relative day or ISO date."""
-    today = date.today()
+    today = today or current_local_datetime().date()
     if value == "tomorrow":
         return today + timedelta(days=1)
     if value == "today":
@@ -238,18 +254,37 @@ def parse_cli_hhmm(value: str) -> datetime.time:
     return datetime.strptime(value, "%H:%M").time()
 
 
-def rounded_now_slot(step_minutes: int = 15) -> datetime:
-    now = datetime.now().astimezone().replace(tzinfo=None, second=0, microsecond=0)
+def rounded_now_slot(step_minutes: int = 15, now: datetime | None = None) -> datetime:
+    """Round Berlin local time up to the next planning slot."""
+    now = (now or current_local_datetime()).astimezone(LOCAL_TIMEZONE).replace(
+        tzinfo=None, second=0, microsecond=0
+    )
     minutes = ((now.minute + step_minutes - 1) // step_minutes) * step_minutes
     return now.replace(minute=0) + timedelta(minutes=minutes)
 
 
-def planning_start_for(args: argparse.Namespace, target_day: date) -> datetime | None:
-    if getattr(args, "start_time", None):
-        return datetime.combine(target_day, parse_cli_hhmm(args.start_time))
-    if target_day == date.today() and (getattr(args, "from_now", False) or args.command in {"preview", "write"}):
-        now_slot = rounded_now_slot()
-        return datetime.combine(target_day, max(now_slot.time(), parse_cli_hhmm("09:00")))
+def planning_start_for(
+    args: argparse.Namespace,
+    target_day: date,
+    local_now: datetime | None = None,
+) -> datetime | None:
+    local_now = local_now or current_local_datetime()
+    local_today = local_now.astimezone(LOCAL_TIMEZONE).date()
+    requested_start = (
+        datetime.combine(target_day, parse_cli_hhmm(args.start_time))
+        if getattr(args, "start_time", None)
+        else None
+    )
+    if target_day == local_today and (
+        requested_start is not None
+        or getattr(args, "from_now", False)
+        or args.command in {"preview", "write"}
+    ):
+        now_slot = rounded_now_slot(now=local_now)
+        earliest_start = datetime.combine(target_day, max(now_slot.time(), parse_cli_hhmm("09:00")))
+        return max(requested_start, earliest_start) if requested_start is not None else earliest_start
+    if requested_start is not None:
+        return requested_start
     return None
 
 
@@ -1084,10 +1119,9 @@ def main() -> int:
     args = parser.parse_args(expanded_argv)
     validate_command_day_combination(parser, args)
 
-    if shortcut_label is not None:
-        print_shortcut_mapping(shortcut_label, expanded_argv)
-
     if args.command == "week":
+        if shortcut_label is not None:
+            print_shortcut_mapping(shortcut_label, expanded_argv)
         print("Nico Day Planner – Wochenplanung Phase 1")
         print("----------------------------------------")
         print(f"Command: week {args.week_command}")
@@ -1096,9 +1130,13 @@ def main() -> int:
         print("")
         return run_week(args)
 
-    target_day = target_date_for(args.day)
+    local_now = current_local_datetime()
+    target_day = target_date_for(args.day, today=local_now.date())
 
-    planning_start = planning_start_for(args, target_day)
+    planning_start = planning_start_for(args, target_day, local_now=local_now)
+
+    if shortcut_label is not None:
+        print_shortcut_mapping(shortcut_label, expanded_argv, local_now, planning_start)
 
     print_header(args, target_day, planning_start)
 
