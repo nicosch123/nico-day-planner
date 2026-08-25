@@ -80,6 +80,41 @@ Automatisches Ersetzen/Löschen ist zusätzlich nur mit `--replace-auto-events` 
 
 Ohne `TODOIST_API_TOKEN` wird kein Fehler geworfen; der Planer meldet den fehlenden Token und nutzt lokale JSON-Beispieldaten.
 
+## Alltag-Shortcuts
+
+Für die tägliche Nutzung bietet `scripts/planner.py` kurze Befehle. Die bisherigen
+ausführlichen Commands bleiben vollständig verfügbar; die Shortcuts werden vor der
+Ausführung transparent mit ihrer ausführlichen Entsprechung angezeigt.
+
+```bash
+python3 scripts/planner.py today
+python3 scripts/planner.py today push
+python3 scripts/planner.py today write
+python3 scripts/planner.py today push write
+python3 scripts/planner.py tomorrow
+python3 scripts/planner.py tomorrow push
+python3 scripts/planner.py tomorrow write
+python3 scripts/planner.py week
+python3 scripts/planner.py week write
+```
+
+`today` plant standardmäßig ab jetzt. `push` erlaubt die Push-Planung bis 23:00;
+`write push` und `push write` sind gleichbedeutend. Eigene Grenzen können weiterhin
+mit `--start-time HH:MM` und `--until HH:MM` angegeben werden. Eine kompakte Übersicht
+zeigen `python3 scripts/planner.py help` und `python3 scripts/planner.py shortcuts`.
+
+Die aktuelle Uhrzeit wird standardmäßig in `Europe/Berlin` ermittelt und auf den
+nächsten 15-Minuten-Slot aufgerundet. Eine andere IANA-Zeitzone kann mit
+`PLANNER_TIMEZONE` gewählt werden. Bei `today` wird eine explizite `--start-time`,
+die bereits in der Vergangenheit liegt, aus Sicherheitsgründen auf den aktuellen
+gerundeten Slot angehoben. Damit werden auch bei Tages-Write-Läufen vergangene
+Planner-Auto-Events nicht ersetzt oder gelöscht.
+
+Auch Shortcut-Commands mit `write` umgehen keine Sicherheitsprüfung. Google Calendar
+wird nur geschrieben, wenn `GOOGLE_CALENDAR_WRITE_ENABLED=true` gesetzt ist. Todoist
+bleibt read-only, manuelle Kalendertermine bleiben unverändert, und Replace-Vorgänge
+bleiben auf die jeweils zulässigen Auto-Event-Marker und Zeitbereiche begrenzt.
+
 ## Anwendungsschicht-CLI
 
 Phase 1 ergänzt eine einfache, freundlichere CLI unter `scripts/planner.py`. Sie verpackt die bestehende sichere Planner-Logik, ohne die Sicherheitsregeln zu lockern.

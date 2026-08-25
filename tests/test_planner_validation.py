@@ -3,6 +3,7 @@ import sys
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -674,18 +675,39 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         self.assertTrue(any("Planung für heute ab 12:00" in warning for warning in plan.warnings))
 
     def test_from_now_uses_rounded_now_slot_for_today(self) -> None:
-        original_rounded = planner.rounded_now_slot
-        try:
-            planner.rounded_now_slot = lambda: datetime.combine(date.today(), datetime.strptime("12:07", "%H:%M").time())
-            args = argparse.Namespace(command="preview", start_time=None, from_now=True)
-            start = planner.planning_start_for(args, date.today())
-        finally:
-            planner.rounded_now_slot = original_rounded
+        now = datetime(2026, 7, 18, 12, 7, tzinfo=ZoneInfo("Europe/Berlin"))
+        args = argparse.Namespace(command="preview", start_time=None, from_now=True)
+        start = planner.planning_start_for(args, now.date(), now)
 
-        self.assertIsNotNone(start)
-        assert start is not None
-        self.assertEqual(start.minute, 7)
-        # rounded_now_slot is responsible for rounding; planner uses it as minimum start.
+        self.assertEqual(start, datetime(2026, 7, 18, 12, 15))
+
+    def test_rounded_now_slot_uses_berlin_timezone_and_rounds_up(self) -> None:
+        utc_now = datetime(2026, 7, 18, 10, 16, tzinfo=ZoneInfo("UTC"))
+        self.assertEqual(
+            planner.rounded_now_slot(now=utc_now),
+            datetime(2026, 7, 18, 12, 30),
+        )
+
+    def test_today_shortcuts_never_start_before_rounded_local_now(self) -> None:
+        now = datetime(2026, 7, 18, 12, 10, tzinfo=ZoneInfo("Europe/Berlin"))
+        parser = planner.build_parser()
+        for shortcut in (["today"], ["today", "push"]):
+            with self.subTest(shortcut=shortcut):
+                expanded, _label = planner.expand_shortcut(shortcut)
+                args = parser.parse_args(expanded)
+                self.assertEqual(
+                    planner.planning_start_for(args, now.date(), now),
+                    datetime(2026, 7, 18, 12, 15),
+                )
+
+    def test_past_manual_today_start_is_clamped_to_rounded_now(self) -> None:
+        now = datetime(2026, 7, 18, 12, 10, tzinfo=ZoneInfo("Europe/Berlin"))
+        args = argparse.Namespace(command="preview", start_time="10:00", from_now=False)
+
+        start = planner.planning_start_for(args, now.date(), now)
+
+        self.assertEqual(start, datetime(2026, 7, 18, 12, 15))
+        self.assertEqual(args.start_time_adjusted_from, "10:00")
 
     def test_restday_quality_treats_workshop_backlog_as_context(self) -> None:
         target_day = date(2026, 7, 18)  # Saturday, no Werkstatt window.
@@ -887,6 +909,38 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         planner.validate_command_day_combination(parser, args)
         self.assertTrue(args.push)
         self.assertTrue(args.allow_late)
+
+    def test_day_shortcuts_expand_to_existing_commands(self) -> None:
+        cases = (
+            (["today"], ["preview", "today", "--from-now"]),
+            (["today", "push"], ["preview", "today", "--from-now", "--until", "23:00", "--push"]),
+            (["today", "write"], ["write", "today", "--from-now"]),
+            (["today", "push", "write"], ["write", "today", "--from-now", "--until", "23:00", "--push"]),
+            (["today", "write", "push"], ["write", "today", "--from-now", "--until", "23:00", "--push"]),
+            (["tomorrow"], ["preview", "tomorrow"]),
+            (["tomorrow", "write"], ["write", "tomorrow"]),
+            (["tomorrow", "push"], ["preview", "tomorrow", "--until", "23:00", "--push"]),
+            (["tomorrow", "write", "push"], ["write", "tomorrow", "--until", "23:00", "--push"]),
+        )
+        parser = planner.build_parser()
+        for shortcut, expected in cases:
+            with self.subTest(shortcut=shortcut):
+                expanded, label = planner.expand_shortcut(shortcut)
+                self.assertEqual(expanded, expected)
+                self.assertIsNotNone(label)
+                planner.validate_command_day_combination(parser, parser.parse_args(expanded))
+
+    def test_shortcut_options_override_defaults_and_week_defaults_to_preview(self) -> None:
+        self.assertEqual(
+            planner.expand_shortcut(["today", "--start-time", "14:00"])[0],
+            ["preview", "today", "--start-time", "14:00"],
+        )
+        self.assertEqual(
+            planner.expand_shortcut(["today", "push", "--until", "22:00"])[0],
+            ["preview", "today", "--until", "22:00", "--from-now", "--push"],
+        )
+        self.assertEqual(planner.expand_shortcut(["week"]), (["week", "preview"], "week"))
+        self.assertEqual(planner.expand_shortcut(["week", "write"]), (["week", "write"], None))
 
 
     def test_quality_uses_push_capacity_without_density_penalty(self) -> None:
