@@ -888,6 +888,38 @@ class PlannerValidationRegressionTest(unittest.TestCase):
         self.assertTrue(args.push)
         self.assertTrue(args.allow_late)
 
+    def test_day_shortcuts_expand_to_existing_commands(self) -> None:
+        cases = (
+            (["today"], ["preview", "today", "--from-now"]),
+            (["today", "push"], ["preview", "today", "--from-now", "--until", "23:00", "--push"]),
+            (["today", "write"], ["write", "today", "--from-now"]),
+            (["today", "push", "write"], ["write", "today", "--from-now", "--until", "23:00", "--push"]),
+            (["today", "write", "push"], ["write", "today", "--from-now", "--until", "23:00", "--push"]),
+            (["tomorrow"], ["preview", "tomorrow"]),
+            (["tomorrow", "write"], ["write", "tomorrow"]),
+            (["tomorrow", "push"], ["preview", "tomorrow", "--until", "23:00", "--push"]),
+            (["tomorrow", "write", "push"], ["write", "tomorrow", "--until", "23:00", "--push"]),
+        )
+        parser = planner.build_parser()
+        for shortcut, expected in cases:
+            with self.subTest(shortcut=shortcut):
+                expanded, label = planner.expand_shortcut(shortcut)
+                self.assertEqual(expanded, expected)
+                self.assertIsNotNone(label)
+                planner.validate_command_day_combination(parser, parser.parse_args(expanded))
+
+    def test_shortcut_options_override_defaults_and_week_defaults_to_preview(self) -> None:
+        self.assertEqual(
+            planner.expand_shortcut(["today", "--start-time", "14:00"])[0],
+            ["preview", "today", "--start-time", "14:00"],
+        )
+        self.assertEqual(
+            planner.expand_shortcut(["today", "push", "--until", "22:00"])[0],
+            ["preview", "today", "--until", "22:00", "--from-now", "--push"],
+        )
+        self.assertEqual(planner.expand_shortcut(["week"]), (["week", "preview"], "week"))
+        self.assertEqual(planner.expand_shortcut(["week", "write"]), (["week", "write"], None))
+
 
     def test_quality_uses_push_capacity_without_density_penalty(self) -> None:
         target = date(2026, 7, 18)
