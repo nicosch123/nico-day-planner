@@ -69,6 +69,68 @@ DRY_RUN_PLAN = SCRIPT_DIR / "dry_run_plan.py"
 
 DATE_FORMAT_HELP = "Erlaubte Formate: yesterday, today, tomorrow oder YYYY-MM-DD."
 
+SHORTCUT_HELP = """Alltag-Shortcuts:
+- planner.py today              Heute ab jetzt planen
+- planner.py today push         Heute ab jetzt bis 23:00 im Push-Modus planen
+- planner.py today write        Heute ab jetzt schreiben
+- planner.py today push write   Heute Push-Plan schreiben
+- planner.py tomorrow           Morgen planen
+- planner.py tomorrow write     Morgen schreiben
+- planner.py tomorrow push      Morgen bis 23:00 im Push-Modus planen
+- planner.py week               Woche planen
+- planner.py week write         Woche schreiben
+- planner.py review today ...   Review speichern
+
+Die langen Commands funktionieren weiterhin. Kalender-Schreibzugriffe benötigen
+weiterhin GOOGLE_CALENDAR_WRITE_ENABLED=true.
+"""
+
+
+def expand_shortcut(argv: list[str]) -> tuple[list[str], str | None]:
+    """Translate a convenient day/week shortcut into the established CLI shape."""
+    if not argv or argv[0] not in {"today", "tomorrow", "week"}:
+        return argv, None
+
+    shortcut = argv[0]
+    if shortcut == "week":
+        if len(argv) == 1 or argv[1].startswith("-"):
+            expanded = ["week", "preview", *argv[1:]]
+            return expanded, "week"
+        return argv, None
+
+    day = shortcut
+    modifiers: list[str] = []
+    option_start = len(argv)
+    for index, value in enumerate(argv[1:], start=1):
+        if value.startswith("-"):
+            option_start = index
+            break
+        modifiers.append(value)
+
+    unknown = set(modifiers) - {"push", "write"}
+    if unknown or len(modifiers) != len(set(modifiers)):
+        return argv, None
+
+    options = argv[option_start:]
+    command = "write" if "write" in modifiers else "preview"
+    push = "push" in modifiers
+    expanded = [command, day, *options]
+    if day == "today" and "--from-now" not in options and "--start-time" not in options:
+        expanded.append("--from-now")
+    if push:
+        if "--until" not in options:
+            expanded.extend(["--until", "23:00"])
+        if "--push" not in options:
+            expanded.append("--push")
+    label = " ".join([day, *modifiers])
+    return expanded, label
+
+
+def print_shortcut_mapping(label: str, expanded: list[str]) -> None:
+    print(f"Shortcut erkannt: {label}")
+    print(f"Entspricht: {' '.join(expanded)}")
+    print("")
+
 
 def target_date_for(value: str) -> date:
     """Return the concrete target date for a supported relative day or ISO date."""
@@ -1013,9 +1075,17 @@ def validate_command_day_combination(parser: argparse.ArgumentParser, args: argp
 
 
 def main() -> int:
+    raw_argv = sys.argv[1:]
+    if raw_argv in (["help"], ["shortcuts"]):
+        print(SHORTCUT_HELP)
+        return 0
+    expanded_argv, shortcut_label = expand_shortcut(raw_argv)
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(expanded_argv)
     validate_command_day_combination(parser, args)
+
+    if shortcut_label is not None:
+        print_shortcut_mapping(shortcut_label, expanded_argv)
 
     if args.command == "week":
         print("Nico Day Planner – Wochenplanung Phase 1")
